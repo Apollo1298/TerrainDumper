@@ -1,0 +1,19 @@
+{
+  "sceneName": "BlackrockRegion",
+  "originX": -1250.0,
+  "originZ": -1251.2,
+  "maxX": 1250.0,
+  "maxZ": 1248.8,
+  "metersPerPixel": 2.0,
+  "width": 1250,
+  "height": 1250,
+  "rowOrder": "row 0 = maxZ (north up)",
+  "maskFile": "mask.png",
+  "notes": [
+    "Paint areas to EXCLUDE from the map, then export that layer alone.",
+    "Opaque (or non-black without alpha) = excluded.",
+    "Template prefers ortho_color_tiled x hillshade when present in the dump.",
+    "Footprint = primary land DEM (+ same-res land siblings); water/ice do not widen it.",
+    "Mask must match width/height above; make_map_bg.py loads masks/<Scene>/mask.png."
+  ]
+}

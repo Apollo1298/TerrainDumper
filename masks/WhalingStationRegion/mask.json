@@ -1,0 +1,21 @@
+{
+  "sceneName": "WhalingStationRegion",
+  "originX": 0.0,
+  "originZ": -3.24,
+  "maxX": 2003.69,
+  "maxZ": 2000.0,
+  "metersPerPixel": 2.0,
+  "width": 1002,
+  "height": 1002,
+  "rowOrder": "row 0 = maxZ (north up)",
+  "maskFile": "mask.png",
+  "notes": [
+    "Paint areas to EXCLUDE from the map, then export that layer alone.",
+    "Opaque (or non-black without alpha) = excluded.",
+    "Template prefers ortho_color_tiled x hillshade when present in the dump.",
+    "Footprint AABB = primary land DEM (+ same-res land siblings); water/ice do not widen it.",
+    "Within that crop, ortho pixels may fill land-DEM holes (paint guide only).",
+    "Optional --include-portals expands AABB past DEM to cover LoadScene markers.",
+    "Mask must match width/height above; make_map_bg.py loads masks/<Scene>/mask.png."
+  ]
+}

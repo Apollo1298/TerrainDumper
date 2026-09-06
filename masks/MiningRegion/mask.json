@@ -1,0 +1,19 @@
+{
+  "sceneName": "MiningRegion",
+  "originX": -980.80554,
+  "originZ": -1235.8671,
+  "maxX": 1019.19446,
+  "maxZ": 764.1329000000001,
+  "metersPerPixel": 2.0,
+  "width": 1000,
+  "height": 1000,
+  "rowOrder": "row 0 = maxZ (north up)",
+  "maskFile": "mask.png",
+  "notes": [
+    "Paint areas to EXCLUDE from the map, then export that layer alone.",
+    "Opaque (or non-black without alpha) = excluded.",
+    "Template prefers ortho_color_tiled x hillshade when present in the dump.",
+    "Footprint = primary land DEM (+ same-res land siblings); water/ice do not widen it.",
+    "Mask must match width/height above; make_map_bg.py loads masks/<Scene>/mask.png."
+  ]
+}

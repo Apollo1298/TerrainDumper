@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net6.0</TargetFramework>
+		<LangVersion>Latest</LangVersion>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+		<RootNamespace>TerrainDumper</RootNamespace>
+		<AssemblyName>TerrainDumper</AssemblyName>
+	</PropertyGroup>
+
+	<PropertyGroup>
+		<TheLongDarkPath>I:\SteamLibrary\steamapps\common\TheLongDark</TheLongDarkPath>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Compile Remove="tools\**" />
+		<EmbeddedResource Remove="tools\**" />
+		<None Remove="tools\**" />
+		<Compile Remove="out\**" />
+		<EmbeddedResource Remove="out\**" />
+		<None Remove="out\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="LavaGang.MelonLoader" Version="0.7.2" />
+		<PackageReference Include="STBlade.Modding.TLD.Il2CppAssemblies.Windows" Version="2.51.0" />
+	</ItemGroup>
+
+	<Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="Exists('$(TheLongDarkPath)/Mods')">
+		<!-- Best-effort copy; ignore if game has the DLL locked -->
+		<Copy SourceFiles="$(TargetPath)" DestinationFolder="$(TheLongDarkPath)/Mods" ContinueOnError="true" />
+	</Target>
+</Project>

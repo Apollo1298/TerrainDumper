@@ -1,0 +1,23 @@
+{
+  "sceneName": "RavineTransitionZone",
+  "originX": -1447.3837636614933,
+  "originZ": -729.1188,
+  "maxX": 560.1837414065114,
+  "maxZ": 407.0,
+  "metersPerPixel": 2.0,
+  "width": 1004,
+  "height": 569,
+  "rowOrder": "row 0 = maxZ (north up)",
+  "maskFile": "mask.png",
+  "notes": [
+    "Paint areas to EXCLUDE from the map, then export that layer alone.",
+    "Opaque (or non-black without alpha) = excluded.",
+    "Template prefers ortho_color_tiled x hillshade when present in the dump.",
+    "Footprint AABB = primary land DEM (+ same-res land siblings), then fog UV canvas.",
+    "Water/ice do not widen the DEM crop; fog UV may expand past it (vanilla aspect).",
+    "Within that crop, ortho pixels may fill land-DEM holes (paint guide only).",
+    "Optional --include-portals expands AABB past DEM to cover LoadScene markers.",
+    "Optional --no-fog-uv keeps DEM footprint only.",
+    "Mask must match width/height above; make_map_bg.py loads masks/<Scene>/mask.png."
+  ]
+}

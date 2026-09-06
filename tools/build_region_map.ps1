@@ -1,0 +1,84 @@
+<#
+.SYNOPSIS
+Build a ship map_bg PNG for one region from its TerrainDumper dump.
+
+.DESCRIPTION
+Resolves the dump folder from the game Mods path, then runs tools/make_map_bg.py
+with ship defaults (4096, raw style, full post-process). Requires a painted
+exclusion mask at masks/<Scene>/mask.png. Writes the PNG only: no DetailedMaps
+copy and no mod build.
+
+.EXAMPLE
+./tools/build_region_map.ps1 LakeRegion
+
+.EXAMPLE
+./tools/build_region_map.ps1 ModForsakenShore_Region -Size 8192
+
+.EXAMPLE
+./tools/build_region_map.ps1 LakeRegion -Baseline F:\Github\DetailedMaps\Maps\map_bg_LakeRegion_new.png
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true, Position = 0)]
+    [string]$Scene,
+
+    [int]$Size = 4096,
+
+    [string]$DumpRoot = 'I:\SteamLibrary\steamapps\common\TheLongDark\Mods\TerrainDumper',
+
+    [string]$OutDir,
+
+    [string]$Baseline,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$MakeMapBgArgs
+)
+
+$ErrorActionPreference = 'Stop'
+
+$repo = Split-Path -Parent $PSScriptRoot
+$script = Join-Path $PSScriptRoot 'make_map_bg.py'
+if (-not (Test-Path $script)) {
+    throw "Missing $script"
+}
+
+$dump = Join-Path $DumpRoot $Scene
+if (-not (Test-Path $dump)) {
+    throw "No dump for '$Scene' at $dump. Run dump_map in that region first."
+}
+foreach ($required in @('alignment_samples.json', 'fog_of_war.json', 'meta.json')) {
+    if (-not (Test-Path (Join-Path $dump $required))) {
+        throw "Dump at $dump is missing $required. Open the charcoal map once in region, then re-run dump_map."
+    }
+}
+if (-not (Get-ChildItem -Path $dump -Filter 'terrain_*_meta.json' -File)) {
+    throw "Dump at $dump has no terrain tiles. Re-run dump_map in that region."
+}
+
+$maskPng = Join-Path $repo "masks\$Scene\mask.png"
+$maskJson = Join-Path $repo "masks\$Scene\mask.json"
+if (-not (Test-Path $maskPng) -or -not (Test-Path $maskJson)) {
+    throw @"
+Missing exclusion mask for '$Scene'.
+  Expected: masks\$Scene\mask.png + mask.json
+  Create template: python tools/make_mask_template.py `"$dump`"
+  Paint exclude areas, export as masks\$Scene\mask.png
+"@
+}
+
+if (-not $OutDir) { $OutDir = Join-Path $repo 'out\maps' }
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+$out = Join-Path $OutDir "map_bg_${Scene}_new.png"
+
+$argList = @($script, $dump, '--size', $Size, '--out', $out)
+if ($Baseline) { $argList += @('--baseline', $Baseline) }
+if ($MakeMapBgArgs) { $argList += $MakeMapBgArgs }
+
+Write-Host "build_region_map: $Scene -> $out" -ForegroundColor Cyan
+& python @argList
+if ($LASTEXITCODE -ne 0) {
+    throw "make_map_bg failed (exit $LASTEXITCODE)"
+}
+
+Write-Host "wrote $out" -ForegroundColor Green
+Write-Host 'Deploy manually: copy into DetailedMaps\Maps, then dotnet build DetailedMaps.csproj -c Release'
