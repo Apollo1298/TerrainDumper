@@ -12,7 +12,8 @@ Every ship map goes through four steps. Exclusion masks are **required** for eve
 1. In-game dump          dump_map
 2. Mask template         make_mask_templates.ps1  →  masks/<Scene>/template.png
 3. Paint mask (manual)   export exclude layer     →  masks/<Scene>/mask.png
-4. Build map             build_region_map.ps1     →  out/maps/map_bg_<Scene>_new.png
+4. Build map             build_region_map.ps1       →  out/maps/map_bg_<Scene>_new.png
+                         build_region_map_color.ps1 →  out/maps_color/map_bg_<Scene>_color.png
 ```
 
 ```mermaid
@@ -21,8 +22,11 @@ flowchart LR
   Raw --> Tpl["2. make_mask_templates.ps1"]
   Tpl --> Paint["3. Paint masks/Scene/mask.png"]
   Raw --> Build["4. build_region_map.ps1"]
+  Raw --> BuildColor["4b. build_region_map_color.ps1"]
   Paint --> Build
+  Paint --> BuildColor
   Build --> Out["out/maps/map_bg_Scene_new.png"]
+  BuildColor --> OutColor["out/maps_color/map_bg_Scene_color.png"]
 ```
 
 ### 1. Dump a region
@@ -54,12 +58,26 @@ Paint areas to **exclude** on a new layer, hide the template, export that layer 
 
 ### 4. Build the map
 
+**Charcoal / legacy ship** (full desat, brown edge tint):
+
 ```text
 ./tools/build_region_map.ps1 CoastalRegion
 ./tools/build_region_map.ps1 LakeRegion
 ```
 
-→ `out/maps/map_bg_<Scene>_new.png`. Fails if the painted mask is missing. (`make_map_bg.py --no-mask` is debug-only.)
+→ `out/maps/map_bg_<Scene>_new.png`.
+
+**Color / vintage** (70% chroma, soft levels, cool dim-gray edge; same void fade 80→black 300 m):
+
+```text
+./tools/build_region_map_color.ps1 LongRailTransitionZone
+./tools/build_region_map_color.ps1 AshCanyonRegion
+./tools/run_map_bg_all_color.ps1
+```
+
+→ `out/maps_color/map_bg_<Scene>_color.png`.
+
+Both fail if the painted mask is missing. (`make_map_bg.py --no-mask` is debug-only.)
 
 Copy into DetailedMaps and rebuild that mod manually.
 
@@ -89,7 +107,7 @@ Built against Il2Cpp assemblies package `2.51.0` (same baseline as DetailedMaps)
 | `terrain_NN_preview.png` | Grayscale quick-look |
 | `fog_of_war.json` | FogOfWar scales/offsets/radii |
 | `alignment_samples.json` | `WorldPositionToMapPosition` samples |
-| `enrichment_*.raw` / `enrichment_meta.json` | Collider raycast heights |
+| `enrichment_*.raw` / `enrichment_meta.json` | Collider raycast heights + HitClass; v4 adds `enrichment_rock_kind.raw` / `enrichment_rock_snow.raw` |
 | `ortho_color_tiled/` | Tiled top-down color capture |
 
 Normalized height → meters ≈ `normalized * size.y + position.y`.
@@ -102,7 +120,13 @@ Normalized height → meters ≈ `normalized * size.y + position.y`.
 ./tools/make_mask_templates.ps1
 python tools/make_mask_template.py path/to/<Scene>
 python tools/make_map_bg.py path/to/<Scene> --size 4096 --out out/maps/map_bg_<Scene>_new.png
+python tools/make_map_bg.py path/to/<Scene> --size 4096 --pipeline color --out out/maps_color/map_bg_<Scene>_color.png
 ./tools/build_region_map.ps1 <Scene>
+./tools/build_region_map_color.ps1 <Scene>
+./tools/run_map_bg_all.ps1
+./tools/run_map_bg_all.ps1 -Jobs 1
+./tools/run_map_bg_all_color.ps1
+./tools/run_map_bg_all_color.ps1 -Jobs 2
 python tools/preview_heights.py path/to/<Scene>
 python tools/check_alignment.py path/to/<Scene> path/to/map_bg.png alignment_check.png
 ```
@@ -111,11 +135,15 @@ Needs `numpy` + `Pillow` (+ `scipy` for inset/mask grow).
 
 ### `make_map_bg` notes
 
-- Ship default: **4096** wide, height from fog UV aspect (square regions 4096×4096; Ravine 4096×2048). Raw style with desaturate → levels → color balance → black 100 m grid @ 1.5 → stipple → vignette → grain.
+- Two presentation pipelines share the same DEM/ortho/enrichment/mask/rock-texture path:
+  - `--pipeline charcoal` (default): full desaturate → charcoal levels → brown edge tint → grid/stipple/vignette/grain.
+  - `--pipeline color`: keep 70% chroma → softer levels → cool dim-gray edge `(48,51,51)`/`(67,71,72)` → same grid/grain/etc.
+- Ship default size: **4096** wide, height from fog UV aspect. Void: edge fade 80 m then black over 300 m; signed-distance blur 36 m.
+- Rock fill uses TLD albedo tiles from `out/textures/tld_rock_samples/` when present (`--no-rock-textures` for flat fill).
 - Auto-uses `ortho_color_tiled` + enrichment when present.
 - Border = terrain DEM footprint; enrichment merges **inside** only.
 - Mask only subtracts from `valid`; map extent / POI affine are unchanged.
-- Useful flags: `--mask`, `--mask-grow-m`, `--no-mask` (debug), `--no-enrichment`, `--style charcoal`, `--no-ship-post`, `--edge-fade-m`, `--grid-scope`.
+- Useful flags: `--pipeline`, `--mask`, `--mask-grow-m`, `--no-mask` (debug), `--no-enrichment`, `--style charcoal`, `--no-ship-post`, `--edge-fade-m`, `--grid-scope`.
 
 ### Other in-game commands
 

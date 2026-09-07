@@ -9,7 +9,7 @@ namespace TerrainDumper;
 
 public class Implementation : MelonMod
 {
-    public const string ModVersion = "0.9.31";
+    public const string ModVersion = "0.9.38";
 
     private static bool _commandsRegistered;
 

@@ -34,8 +34,14 @@ internal static class EnrichmentDump
     private const float DefaultProbeCellSize = 8f;
     private const float DefaultNamesProbeCellSize = 2f;
     private const float DefaultLeakMinAboveMeters = 5f;
+    /// <summary>
+    /// Morph-close structure class holes this many metres so building footprints
+    /// (missing roof colliders) still classify as structure for contour suppress.
+    /// </summary>
+    private const float StructureCloseMeters = 2.5f;
 
     /// <summary>Per-cell class ids written to enrichment_class.raw (must match ClassLabelNames).</summary>
+    /// <remarks>Append-only: never reorder or reuse ids (old dumps must keep loading).</remarks>
     internal enum HitClass : byte
     {
         None = 0,
@@ -45,6 +51,35 @@ internal static class EnrichmentDump
         Structure = 3,
         IceBackdrop = 4,
         Ignore = 5,
+        /// <summary>Roads / road beds — contour suppress only (no fill/rim).</summary>
+        Road = 6,
+        /// <summary>Trails / footpaths — contour suppress only.</summary>
+        Path = 7,
+        /// <summary>Rail beds — contour suppress only (trains/bridges stay structure).</summary>
+        Rail = 8,
+    }
+
+    /// <summary>
+    /// Rock mesh family for texture matching (enrichment_rock_kind.raw).
+    /// Only meaningful when HitClass is Rock; append-only like HitClass.
+    /// </summary>
+    internal enum RockKind : byte
+    {
+        None = 0,
+        Other = 1,
+        Cliff08 = 2,
+        Cliff09 = 3,
+        Rock07 = 4,
+        Rock08 = 5,
+        Rock09 = 6,
+        Rock04 = 7,
+        RockMid = 8,
+        CaveRock = 9,
+        IceCaveRock = 10,
+        MineRock = 11,
+        GearRock = 12,
+        Boulder = 13,
+        Cliff = 14,
     }
 
     private static readonly string[] ClassLabelNames =
@@ -55,6 +90,28 @@ internal static class EnrichmentDump
         "structure",
         "ice_backdrop",
         "ignore",
+        "road",
+        "path",
+        "rail",
+    };
+
+    private static readonly string[] RockKindLabelNames =
+    {
+        "none",
+        "other",
+        "cliff08",
+        "cliff09",
+        "rock07",
+        "rock08",
+        "rock09",
+        "rock04",
+        "rockmid",
+        "caverock",
+        "icecaverock",
+        "minerock",
+        "gearrock",
+        "boulder",
+        "cliff",
     };
 
     private static bool _running;
@@ -71,6 +128,8 @@ internal static class EnrichmentDump
     private static int _row;
     private static float[]? _heights; // row-major, NaN = no hit
     private static byte[]? _classes; // row-major HitClass ids
+    private static byte[]? _rockKinds; // row-major RockKind ids (0 if not rock)
+    private static byte[]? _rockSnow; // row-major 0/1 snow modifier
     private static int _hits;
     private static int _rays;
     private static int _skippedInvisible;
@@ -81,6 +140,8 @@ internal static class EnrichmentDump
     private static Dictionary<int, bool>? _wallCache;
     /// <summary>Collider.GetInstanceID() → HitClass. Cleared each dump/probe.</summary>
     private static Dictionary<int, byte>? _classCache;
+    /// <summary>Collider.GetInstanceID() → packed rockKind|snow&lt;&lt;8. Cleared each dump/probe.</summary>
+    private static Dictionary<int, ushort>? _rockDetailCache;
     private static int _layerCharControllerOnly = -2; // -2 = unresolved, -1 = missing
     private static int _layerNoCollidePlayer = -2;
     private static int _layerParticleKiller = -2;
@@ -98,7 +159,10 @@ internal static class EnrichmentDump
 
     private const string ClassRuleDescription =
         "TerrainCollider→terrain; man-made name/path (Bridge/Hangar/Cabin/Dam/Quonset/…/STR_/BLD_)→structure; " +
-        "Rock/Boulder/Cliff→rock; Ice/Water/Pond/Creek/Shelf/Backdrop→ice_backdrop; " +
+        "Ice/Water/Pond/Creek/Shelf/Backdrop→ice_backdrop; " +
+        "Road*→road; Trail/Path→path; Rail/Railroad/Railway→rail; " +
+        "Rock/Boulder/Cliff→rock (Rock not matched inside Blackrock); " +
+        "rock cells also store rockKind stem + snow flag from names; " +
         "unmatched Box/Capsule/Sphere→ignore; else→terrain";
 
     public static bool IsRunning => _running;
@@ -759,7 +823,7 @@ internal static class EnrichmentDump
 
     public static void Tick()
     {
-        if (!_running || _heights == null || _classes == null)
+        if (!_running || _heights == null || _classes == null || _rockKinds == null || _rockSnow == null)
             return;
 
         try
@@ -778,7 +842,11 @@ internal static class EnrichmentDump
                     {
                         int i = iz * _width + ix;
                         _heights[i] = y;
-                        _classes[i] = (byte)ClassifyHitCached(hitCol);
+                        HitClass hc = ClassifyHitCached(hitCol);
+                        _classes[i] = (byte)hc;
+                        GetRockDetailCached(hitCol, hc, out byte kind, out byte snow);
+                        _rockKinds[i] = kind;
+                        _rockSnow[i] = snow;
                         _hits++;
                     }
                 }
@@ -802,6 +870,66 @@ internal static class EnrichmentDump
         }
     }
 
+    private static bool IsOverlayHitClass(HitClass c) =>
+        c == HitClass.Structure
+        || c == HitClass.Rock
+        || c == HitClass.IceBackdrop
+        || c == HitClass.Road
+        || c == HitClass.Path
+        || c == HitClass.Rail;
+
+    /// <summary>
+    /// Prefer structure/rock/ice on the same column when the nearest accepted hit is a
+    /// weak class (terrain-by-name / ignore proxy) sitting on top of real overlay geometry.
+    /// </summary>
+    private static bool TryPreferOverlayHit(
+        Vector3 origin, float minDistance, out float y, out Collider? hitCol)
+    {
+        y = 0f;
+        hitCol = null;
+        EnsureHitBuffer();
+        int n = Physics.RaycastNonAlloc(
+            origin, Vector3.down, _hitBuf, _rayDist,
+            _raycastMask, QueryTriggerInteraction.Ignore);
+        if (n <= 0)
+            return false;
+
+        float bestDist = float.PositiveInfinity;
+        float bestY = 0f;
+        Collider? bestCol = null;
+        int lim = Math.Min(n, HitBufferSize);
+        for (int i = 0; i < lim; i++)
+        {
+            RaycastHit hit = _hitBuf![i];
+            if (hit.distance + 1e-3f < minDistance)
+                continue;
+            Collider? col = hit.collider;
+            if (col == null || col.TryCast<TerrainCollider>() != null)
+                continue;
+            if (IsInvisibleWallColliderCached(col))
+                continue;
+            HitClass hc = ClassifyHitCached(col);
+            if (!IsOverlayHitClass(hc))
+                continue;
+            // Prefer nearer overlay; structure beats rock/ice at equal-ish distance.
+            bool better = bestCol == null || hit.distance < bestDist - 1e-3f
+                || (Mathf.Abs(hit.distance - bestDist) <= 1e-3f
+                    && hc == HitClass.Structure
+                    && ClassifyHitCached(bestCol) != HitClass.Structure);
+            if (!better)
+                continue;
+            bestDist = hit.distance;
+            bestY = hit.point.y;
+            bestCol = col;
+        }
+
+        if (bestCol == null)
+            return false;
+        y = bestY;
+        hitCol = bestCol;
+        return true;
+    }
+
     private static bool TrySampleHeight(Vector3 origin, out float y, out Collider? hitCol)
     {
         y = 0f;
@@ -823,6 +951,14 @@ internal static class EnrichmentDump
 
         if (!IsInvisibleWallColliderCached(firstCol))
         {
+            HitClass topClass = ClassifyHitCached(firstCol);
+            if (!IsOverlayHitClass(topClass)
+                && TryPreferOverlayHit(origin, first.distance, out float oy, out Collider? ocol))
+            {
+                y = oy;
+                hitCol = ocol;
+                return true;
+            }
             y = first.point.y;
             hitCol = firstCol;
             return true;
@@ -877,9 +1013,187 @@ internal static class EnrichmentDump
 
         if (!found)
             return false;
+
+        // Same weak-top preference after punching through a barrier.
+        HitClass acceptedClass = ClassifyHitCached(bestCol);
+        if (!IsOverlayHitClass(acceptedClass)
+            && TryPreferOverlayHit(origin, bestDist, out float prefY, out Collider? prefCol))
+        {
+            y = prefY;
+            hitCol = prefCol;
+            return true;
+        }
+
         y = bestY;
         hitCol = bestCol;
         return true;
+    }
+
+    /// <summary>
+    /// Fill holes inside structure footprints (missing roof colliders) and lift those
+    /// cells toward neighboring structure heights so contour suppress / max-merge see a building.
+    /// </summary>
+    private static int CloseStructureFootprints()
+    {
+        if (_classes == null || _heights == null || _width < 3 || _height < 3)
+            return 0;
+
+        int iters = Math.Max(1, Mathf.CeilToInt(StructureCloseMeters / Math.Max(1e-3f, _cellSize)));
+        int n = _width * _height;
+        var seed = new bool[n];
+        int seedCount = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (_classes[i] != (byte)HitClass.Structure)
+                continue;
+            seed[i] = true;
+            seedCount++;
+        }
+        if (seedCount == 0)
+            return 0;
+
+        bool[] closed = BinaryClose(seed, _width, _height, iters);
+
+        // Dilate max structure height across the closed mask.
+        var roof = new float[n];
+        for (int i = 0; i < n; i++)
+            roof[i] = seed[i] && !float.IsNaN(_heights[i]) ? _heights[i] : float.NegativeInfinity;
+        for (int pass = 0; pass < iters; pass++)
+            roof = DilateMax(roof, closed, _width, _height);
+
+        int filled = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (!closed[i] || seed[i])
+                continue;
+            byte c = _classes[i];
+            if (c != (byte)HitClass.Terrain
+                && c != (byte)HitClass.None
+                && c != (byte)HitClass.Ignore)
+                continue;
+
+            _classes[i] = (byte)HitClass.Structure;
+            if (float.IsFinite(roof[i]))
+            {
+                float h = _heights[i];
+                if (float.IsNaN(h) || roof[i] > h)
+                    _heights[i] = roof[i];
+            }
+            filled++;
+        }
+        return filled;
+    }
+
+    private static bool[] BinaryClose(bool[] src, int w, int h, int iters)
+    {
+        bool[] cur = src;
+        for (int i = 0; i < iters; i++)
+            cur = BinaryDilate(cur, w, h);
+        for (int i = 0; i < iters; i++)
+            cur = BinaryErode(cur, w, h);
+        return cur;
+    }
+
+    private static bool[] BinaryDilate(bool[] src, int w, int h)
+    {
+        var dst = new bool[src.Length];
+        for (int z = 0; z < h; z++)
+        {
+            int row = z * w;
+            for (int x = 0; x < w; x++)
+            {
+                if (!src[row + x])
+                    continue;
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    int zz = z + dz;
+                    if ((uint)zz >= (uint)h)
+                        continue;
+                    int row2 = zz * w;
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int xx = x + dx;
+                        if ((uint)xx >= (uint)w)
+                            continue;
+                        dst[row2 + xx] = true;
+                    }
+                }
+            }
+        }
+        return dst;
+    }
+
+    private static bool[] BinaryErode(bool[] src, int w, int h)
+    {
+        var dst = new bool[src.Length];
+        for (int z = 0; z < h; z++)
+        {
+            int row = z * w;
+            for (int x = 0; x < w; x++)
+            {
+                if (!src[row + x])
+                    continue;
+                bool keep = true;
+                for (int dz = -1; dz <= 1 && keep; dz++)
+                {
+                    int zz = z + dz;
+                    if ((uint)zz >= (uint)h)
+                    {
+                        keep = false;
+                        break;
+                    }
+                    int row2 = zz * w;
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int xx = x + dx;
+                        if ((uint)xx >= (uint)w || !src[row2 + xx])
+                        {
+                            keep = false;
+                            break;
+                        }
+                    }
+                }
+                dst[row + x] = keep;
+            }
+        }
+        return dst;
+    }
+
+    private static float[] DilateMax(float[] src, bool[] domain, int w, int h)
+    {
+        var dst = (float[])src.Clone();
+        for (int z = 0; z < h; z++)
+        {
+            int row = z * w;
+            for (int x = 0; x < w; x++)
+            {
+                int i = row + x;
+                if (!domain[i])
+                    continue;
+                float m = src[i];
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    int zz = z + dz;
+                    if ((uint)zz >= (uint)h)
+                        continue;
+                    int row2 = zz * w;
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int xx = x + dx;
+                        if ((uint)xx >= (uint)w)
+                            continue;
+                        int j = row2 + xx;
+                        if (!domain[j])
+                            continue;
+                        float v = src[j];
+                        if (v > m)
+                            m = v;
+                    }
+                }
+                dst[i] = m;
+            }
+        }
+        return dst;
     }
 
     private static bool IsInvisibleWallColliderCached(Collider? col)
@@ -902,6 +1216,7 @@ internal static class EnrichmentDump
     {
         _wallCache?.Clear();
         _classCache?.Clear();
+        _rockDetailCache?.Clear();
     }
 
     private static void ResolveBarrierLayers()
@@ -997,6 +1312,103 @@ internal static class EnrichmentDump
         return c;
     }
 
+    private static void GetRockDetailCached(Collider? col, HitClass hc, out byte kind, out byte snow)
+    {
+        kind = 0;
+        snow = 0;
+        if (hc != HitClass.Rock || col == null)
+            return;
+
+        _rockDetailCache ??= new Dictionary<int, ushort>(256);
+        int id = col.GetInstanceID();
+        if (_rockDetailCache.TryGetValue(id, out ushort packed))
+        {
+            kind = (byte)(packed & 0xFF);
+            snow = (byte)((packed >> 8) & 0xFF);
+            return;
+        }
+
+        ParseRockDetail(col, out RockKind rk, out bool hasSnow);
+        kind = (byte)rk;
+        snow = hasSnow ? (byte)1 : (byte)0;
+        _rockDetailCache[id] = (ushort)(kind | (snow << 8));
+    }
+
+    /// <summary>
+    /// Leaf-first name walk: first recognizable rock stem wins; Snow anywhere in hierarchy sets flag.
+    /// </summary>
+    private static void ParseRockDetail(Collider col, out RockKind kind, out bool snow)
+    {
+        kind = RockKind.Other;
+        snow = false;
+        GameObject? go = col.gameObject;
+        if (go == null)
+            return;
+
+        Transform? t = go.transform;
+        bool foundKind = false;
+        for (int depth = 0; t != null && depth < 12; depth++)
+        {
+            string n = t.name ?? "";
+            if (n.IndexOf("Snow", StringComparison.OrdinalIgnoreCase) >= 0)
+                snow = true;
+
+            if (!foundKind)
+            {
+                RockKind matched = MatchRockKindInName(n);
+                if (matched != RockKind.None)
+                {
+                    kind = matched;
+                    foundKind = true;
+                }
+            }
+
+            t = t.parent;
+        }
+    }
+
+    /// <summary>
+    /// Returns None if this name has no rock-family tokens; otherwise a RockKind
+    /// (Other for generic Rock/Cliff/Boulder). Longer stems checked first.
+    /// </summary>
+    private static RockKind MatchRockKindInName(string n)
+    {
+        if (string.IsNullOrEmpty(n))
+            return RockKind.None;
+
+        if (n.IndexOf("TRN_RockCliff_09", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Cliff09;
+        if (n.IndexOf("TRN_RockCliff_08", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Cliff08;
+        if (n.IndexOf("TRN_Rock07", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Rock07;
+        if (n.IndexOf("TRN_Rock08", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Rock08;
+        if (n.IndexOf("TRN_Rock09", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Rock09;
+        if (n.IndexOf("TRN_Rock04", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Rock04;
+        if (n.IndexOf("TRN_RockMid", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.RockMid;
+        if (n.IndexOf("TRN_RockCliff", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Cliff;
+        if (n.IndexOf("IceCaveRock", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.IceCaveRock;
+        if (n.IndexOf("CaveRock", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.CaveRock;
+        if (n.IndexOf("MineRock", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.MineRock;
+        if (n.IndexOf("GEAR_Rock", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.GearRock;
+        if (n.IndexOf("Boulder", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Boulder;
+        if (n.IndexOf("Cliff", StringComparison.OrdinalIgnoreCase) >= 0)
+            return RockKind.Cliff;
+        if (NameLooksLikeRock(n))
+            return RockKind.Other;
+        return RockKind.None;
+    }
+
     /// <summary>
     /// Map an accepted enrichment hit to a small class for offline contour/rim decisions.
     /// Patterns are intentionally conservative; refine after dump_enrichment_leak reviews.
@@ -1030,24 +1442,157 @@ internal static class EnrichmentDump
         {
             string n = t.name ?? "";
             // Structures before rock (e.g. "RockBridge" → structure).
+            // Trains/bridges stay structure; bare Rail* is HitClass.Rail below.
             if (NameLooksLikeStructure(n))
                 return HitClass.Structure;
-            if (n.IndexOf("Rock", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("Boulder", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("Cliff", StringComparison.OrdinalIgnoreCase) >= 0)
-                return HitClass.Rock;
-            // Match OrthoDump / mapalign backdrop tokens, plus shelf/backdrop lids.
-            if (n.IndexOf("Ice", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("Water", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("Pond", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("Creek", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("Shelf", StringComparison.OrdinalIgnoreCase) >= 0
-                || n.IndexOf("Backdrop", StringComparison.OrdinalIgnoreCase) >= 0)
+            // Ice/water before rock: EP4_Blackrock_WaterTerrain* contains both tokens.
+            if (NameLooksLikeIceBackdrop(n))
                 return HitClass.IceBackdrop;
+            // Transport before rock (Blackrock_Road Network, etc.).
+            if (NameLooksLikeRail(n))
+                return HitClass.Rail;
+            if (NameLooksLikeRoad(n))
+                return HitClass.Road;
+            if (NameLooksLikePath(n))
+                return HitClass.Path;
+            if (NameLooksLikeRock(n))
+                return HitClass.Rock;
             t = t.parent;
         }
 
         return HitClass.None;
+    }
+
+    /// <summary>
+    /// OrthoDump / mapalign backdrop tokens, plus shelf/backdrop lids.
+    /// "Ice" is not matched inside Vice (desk vise) / Office / Service / etc.
+    /// </summary>
+    private static bool NameLooksLikeIceBackdrop(string n)
+    {
+        if (n.IndexOf("Water", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Pond", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Creek", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Shelf", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Backdrop", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        int start = 0;
+        while (true)
+        {
+            int idx = n.IndexOf("Ice", start, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+                return false;
+            // Common English false friends containing "ice".
+            if (IsSpanInsideToken(n, idx, 3, "Vice")
+                || IsSpanInsideToken(n, idx, 3, "Office")
+                || IsSpanInsideToken(n, idx, 3, "Service")
+                || IsSpanInsideToken(n, idx, 3, "Device")
+                || IsSpanInsideToken(n, idx, 3, "Police")
+                || IsSpanInsideToken(n, idx, 3, "License")
+                || IsSpanInsideToken(n, idx, 3, "Practice")
+                || IsSpanInsideToken(n, idx, 3, "Justice"))
+            {
+                start = idx + 1;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>Rail beds / railroad mesh (not Railing; not Trail/Trailer; trains stay structure).</summary>
+    private static bool NameLooksLikeRail(string n)
+    {
+        if (n.IndexOf("Railroad", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Railway", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Railbed", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Trackbed", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        int start = 0;
+        while (true)
+        {
+            int idx = n.IndexOf("Rail", start, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+                return false;
+            int after = idx + 4;
+            // "Railing" / "Railings" are props, not rail beds.
+            if (after < n.Length && (n[after] == 'i' || n[after] == 'I'))
+            {
+                start = idx + 1;
+                continue;
+            }
+            // "Trail" / "Trailer" contain "rail" (T + rail …).
+            if (IsSpanInsideToken(n, idx, 4, "Trail"))
+            {
+                start = idx + 1;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>Roads / road reinforcements (Railroad handled as rail).</summary>
+    private static bool NameLooksLikeRoad(string n)
+    {
+        if (n.IndexOf("Railroad", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Railway", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        return n.IndexOf("Road", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    /// <summary>Footpaths / trails (Boardwalk/Walkway stay structure; Trailer ≠ Trail).</summary>
+    private static bool NameLooksLikePath(string n)
+    {
+        int start = 0;
+        while (true)
+        {
+            int idx = n.IndexOf("Trail", start, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+                break;
+            // "Trailer" starts with "Trail".
+            int after = idx + 5;
+            if (after < n.Length && (n[after] == 'e' || n[after] == 'E'))
+            {
+                start = idx + 1;
+                continue;
+            }
+            return true;
+        }
+        // Bare "Path" — avoid rare false friends if any appear later.
+        int pidx = n.IndexOf("Path", StringComparison.OrdinalIgnoreCase);
+        if (pidx < 0)
+            return false;
+        if (n.IndexOf("Pathfind", StringComparison.OrdinalIgnoreCase) >= 0)
+            return false;
+        return true;
+    }
+
+    /// <summary>
+    /// Rock/Boulder/Cliff, but "Rock" inside "Blackrock" is the region name, not geology.
+    /// </summary>
+    private static bool NameLooksLikeRock(string n)
+    {
+        if (n.IndexOf("Boulder", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Cliff", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+
+        int start = 0;
+        while (true)
+        {
+            int idx = n.IndexOf("Rock", start, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+                return false;
+
+            // "Blackrock" / "BlackRock" — region prefix, not a rock mesh.
+            if (idx >= 5
+                && string.Compare(n, idx - 5, "Black", 0, 5, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                start = idx + 4;
+                continue;
+            }
+
+            return true;
+        }
     }
 
     private static bool NameLooksLikeStructure(string n)
@@ -1106,6 +1651,17 @@ internal static class EnrichmentDump
                 return true;
             }
 
+            // "Hut" must not match inside "Shutter".
+            if (token.Equals("Hut", StringComparison.OrdinalIgnoreCase))
+            {
+                if (IsSpanInsideToken(n, idx, token.Length, "Shutter"))
+                {
+                    start = idx + 1;
+                    continue;
+                }
+                return true;
+            }
+
             return true;
         }
     }
@@ -1152,7 +1708,8 @@ internal static class EnrichmentDump
         "PoleWood", "SignPark", "PicnicTable", "PlantSupport", "BarrelWood",
         // Vehicles / rail / cargo — CarSedan covers undamaged + Damaged sedan prefabs (names probe)
         "CarSedan", "CarTruck", "MineTruck", "HayCart", "CargoContainer",
-        "Plane", "Aircraft", "Wreck", "Truck", "Train", "Rail", "Bus", "Helicopter",
+        // Rail beds → HitClass.Rail; keep rolling stock / bridges as structure.
+        "Plane", "Aircraft", "Wreck", "Truck", "Train", "Bus", "Helicopter",
         "Locomotive",
         // Wood stacks / fallen timber props
         "Woodpile", "LogPile", "LogFallen", "FallenLog", "OBJ_Log", "TRN_Log",
@@ -1187,6 +1744,8 @@ internal static class EnrichmentDump
         _heights = new float[_width * _height];
         Array.Fill(_heights, float.NaN);
         _classes = new byte[_width * _height];
+        _rockKinds = new byte[_width * _height];
+        _rockSnow = new byte[_width * _height];
         _row = 0;
         _hits = 0;
         _rays = 0;
@@ -1256,6 +1815,8 @@ internal static class EnrichmentDump
         Implementation.EnrichmentTicksEnabled = false;
         _heights = null;
         _classes = null;
+        _rockKinds = null;
+        _rockSnow = null;
         DumpBackground.Release();
     }
 
@@ -1348,10 +1909,18 @@ internal static class EnrichmentDump
 
     private static void Finish()
     {
-        if (_heights == null || _classes == null)
+        if (_heights == null || _classes == null || _rockKinds == null || _rockSnow == null)
         {
             Abort();
             return;
+        }
+
+        int structureFilled = CloseStructureFootprints();
+        if (structureFilled > 0)
+        {
+            Msg(
+                $"Enrichment structure close {StructureCloseMeters:F1}m: " +
+                $"filled {structureFilled} terrain/ignore hole cells");
         }
 
         float hMin = float.PositiveInfinity;
@@ -1400,9 +1969,13 @@ internal static class EnrichmentDump
         string heightsName = "enrichment_heights.raw";
         string maskName = "enrichment_mask.raw";
         string className = "enrichment_class.raw";
+        string rockKindName = "enrichment_rock_kind.raw";
+        string rockSnowName = "enrichment_rock_snow.raw";
         File.WriteAllBytes(Path.Combine(_outDir, heightsName), raw);
         File.WriteAllBytes(Path.Combine(_outDir, maskName), mask);
         File.WriteAllBytes(Path.Combine(_outDir, className), _classes);
+        File.WriteAllBytes(Path.Combine(_outDir, rockKindName), _rockKinds);
+        File.WriteAllBytes(Path.Combine(_outDir, rockSnowName), _rockSnow);
 
         int[] classHist = new int[ClassLabelNames.Length];
         for (int i = 0; i < _classes.Length; i++)
@@ -1412,16 +1985,28 @@ internal static class EnrichmentDump
                 classHist[c]++;
         }
 
+        int[] kindHist = new int[RockKindLabelNames.Length];
+        int snowCells = 0;
+        for (int i = 0; i < _rockKinds.Length; i++)
+        {
+            int k = _rockKinds[i];
+            if (k >= 0 && k < kindHist.Length)
+                kindHist[k]++;
+            if (_rockSnow[i] != 0)
+                snowCells++;
+        }
+
         var meta = new EnrichmentMeta
         {
-            FormatVersion = 3,
+            FormatVersion = 4,
             SceneName = _sceneName,
             DumpedAtUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
             ModVersion = Implementation.ModVersion,
             Method =
-                "Physics.Raycast down (NonAlloc only if top hit is barrier); " +
+                "Physics.Raycast down (NonAlloc if top hit is barrier or weak terrain/ignore over overlay); " +
                 "skip " + SkipRuleDescription + "; " +
                 "classify " + ClassRuleDescription + "; " +
+                $"morph-close structure holes {StructureCloseMeters:F1}m; " +
                 "raycast mask = DefaultRaycastLayers minus barrier/TriggerIgnoreRaycast layers; Ignore triggers",
             CellSize = _cellSize,
             Width = _width,
@@ -1439,14 +2024,20 @@ internal static class EnrichmentDump
             MaskFile = maskName,
             ClassFile = className,
             ClassLabels = ClassLabelNames,
+            RockKindFile = rockKindName,
+            RockKindLabels = RockKindLabelNames,
+            RockSnowFile = rockSnowName,
             Notes = new[]
             {
                 "Row-major [z, x]; world X = originX + ix*cellSize, Z = originZ + iz*cellSize.",
                 "uint16 = round((meters - heightMin) / (heightMax - heightMin) * 65535); mask 0 = no hit.",
                 "enrichment_class.raw: 1 byte/cell HitClass id (see classLabels); none=0 when mask=0.",
-                "Merge with terrain DEM via max() in make_map_bg.py; contour-suppress rock+structure; " +
+                "enrichment_rock_kind.raw: 1 byte/cell RockKind id (see rockKindLabels); 0 when not rock.",
+                "enrichment_rock_snow.raw: 1 byte/cell; 1 if a Snow* name appears on the rock hit hierarchy.",
+                "Merge with terrain DEM via max() in make_map_bg.py; contour-suppress rock protrusions + closed structure fill; " +
                 "rock = soft rim, structure (bridges/docks/buildings/logs) = thin sharp rim.",
                 "Invisible barriers / Player prologue volumes / TriggerReverb / WindSpeedTriggers are skipped; next hit down is kept.",
+                "After raycast: morph-close structure class to fill missing roof-collider holes; lift filled cells toward neighbor structure height.",
             },
         };
 
@@ -1462,13 +2053,23 @@ internal static class EnrichmentDump
                 histBits.Add($"{ClassLabelNames[i]}={classHist[i]}");
         }
 
+        var kindBits = new List<string>(RockKindLabelNames.Length);
+        for (int i = 1; i < RockKindLabelNames.Length; i++)
+        {
+            if (kindHist[i] > 0)
+                kindBits.Add($"{RockKindLabelNames[i]}={kindHist[i]}");
+        }
+
         Msg(
             $"Enrichment done → {_outDir} (hits={_hits}/{_rays}, skippedInvisible={_skippedInvisible}, " +
-            $"Y={hMin:F1}..{hMax:F1}m, classes: {string.Join(" ", histBits)})");
+            $"Y={hMin:F1}..{hMax:F1}m, classes: {string.Join(" ", histBits)}, " +
+            $"rockKinds: {string.Join(" ", kindBits)}, rockSnow={snowCells})");
         _running = false;
         Implementation.EnrichmentTicksEnabled = false;
         _heights = null;
         _classes = null;
+        _rockKinds = null;
+        _rockSnow = null;
         DumpBackground.Release();
     }
 
@@ -1647,6 +2248,9 @@ internal static class EnrichmentDump
         [JsonPropertyName("maskFile")] public string MaskFile { get; set; } = "";
         [JsonPropertyName("classFile")] public string? ClassFile { get; set; }
         [JsonPropertyName("classLabels")] public string[]? ClassLabels { get; set; }
+        [JsonPropertyName("rockKindFile")] public string? RockKindFile { get; set; }
+        [JsonPropertyName("rockKindLabels")] public string[]? RockKindLabels { get; set; }
+        [JsonPropertyName("rockSnowFile")] public string? RockSnowFile { get; set; }
         [JsonPropertyName("notes")] public string[]? Notes { get; set; }
     }
 }

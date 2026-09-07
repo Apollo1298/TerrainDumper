@@ -266,6 +266,10 @@ def load_enrichment(dump: Path) -> tuple[np.ndarray, np.ndarray, dict] | None:
     When enrichment_meta.json lists classFile, meta includes:
       classes: uint8[h,w] HitClass ids
       classLabels: list[str] ordered by id
+    formatVersion 4+ may also include:
+      rockKinds: uint8[h,w] RockKind ids
+      rockKindLabels: list[str]
+      rockSnow: uint8[h,w] 0/1 snow modifier
     """
     meta_path = dump / "enrichment_meta.json"
     if not meta_path.exists():
@@ -302,11 +306,28 @@ def load_enrichment(dump: Path) -> tuple[np.ndarray, np.ndarray, dict] | None:
                     "bridge",
                     "ice_backdrop",
                     "ignore",
+                    "road",
+                    "path",
+                    "rail",
                 ]
+    rock_kind_file = meta.get("rockKindFile")
+    if rock_kind_file:
+        rk_path = dump / str(rock_kind_file)
+        if rk_path.exists():
+            meta_adapt["rockKinds"] = np.fromfile(rk_path, dtype=np.uint8).reshape((h, w))
+            rk_labels = meta.get("rockKindLabels")
+            if isinstance(rk_labels, list) and rk_labels:
+                meta_adapt["rockKindLabels"] = [str(x) for x in rk_labels]
+    rock_snow_file = meta.get("rockSnowFile")
+    if rock_snow_file:
+        rs_path = dump / str(rock_snow_file)
+        if rs_path.exists():
+            meta_adapt["rockSnow"] = np.fromfile(rs_path, dtype=np.uint8).reshape((h, w))
     return meters, mask, meta_adapt
 
 
 # HitClass ids from EnrichmentDump (formatVersion 3+)
+# Append-only — never reorder. Labels in enrichment_meta.classLabels are authoritative.
 ENRICH_CLASS_NONE = 0
 ENRICH_CLASS_TERRAIN = 1
 ENRICH_CLASS_ROCK = 2
@@ -314,10 +335,63 @@ ENRICH_CLASS_STRUCTURE = 3  # bridges/docks/buildings/logs; legacy dumps used "b
 ENRICH_CLASS_BRIDGE = ENRICH_CLASS_STRUCTURE  # alias for older code
 ENRICH_CLASS_ICE_BACKDROP = 4
 ENRICH_CLASS_IGNORE = 5
+ENRICH_CLASS_ROAD = 6
+ENRICH_CLASS_PATH = 7
+ENRICH_CLASS_RAIL = 8
 ENRICH_OVERLAY_CLASSES = (ENRICH_CLASS_ROCK, ENRICH_CLASS_STRUCTURE)
+ENRICH_TRANSPORT_CLASSES = (ENRICH_CLASS_ROAD, ENRICH_CLASS_PATH, ENRICH_CLASS_RAIL)
+
+# RockKind ids from EnrichmentDump (formatVersion 4+)
+# Append-only — never reorder. Labels in enrichment_meta.rockKindLabels are authoritative.
+ENRICH_ROCK_KIND_NONE = 0
+ENRICH_ROCK_KIND_OTHER = 1
+ENRICH_ROCK_KIND_CLIFF08 = 2
+ENRICH_ROCK_KIND_CLIFF09 = 3
+ENRICH_ROCK_KIND_ROCK07 = 4
+ENRICH_ROCK_KIND_ROCK08 = 5
+ENRICH_ROCK_KIND_ROCK09 = 6
+ENRICH_ROCK_KIND_ROCK04 = 7
+ENRICH_ROCK_KIND_ROCKMID = 8
+ENRICH_ROCK_KIND_CAVEROCK = 9
+ENRICH_ROCK_KIND_ICECAVEROCK = 10
+ENRICH_ROCK_KIND_MINEROCK = 11
+ENRICH_ROCK_KIND_GEARROCK = 12
+ENRICH_ROCK_KIND_BOULDER = 13
+ENRICH_ROCK_KIND_CLIFF = 14
+
+_DEFAULT_ROCK_KIND_LABELS = [
+    "none",
+    "other",
+    "cliff08",
+    "cliff09",
+    "rock07",
+    "rock08",
+    "rock09",
+    "rock04",
+    "rockmid",
+    "caverock",
+    "icecaverock",
+    "minerock",
+    "gearrock",
+    "boulder",
+    "cliff",
+]
+
+
+def enrichment_rock_kind_ids(
+    rock_kind_labels: list[str] | None,
+    want: set[str],
+    *,
+    default: tuple[int, ...] = (),
+) -> set[int]:
+    """Resolve RockKind label names to ids (meta labels authoritative)."""
+    labels = rock_kind_labels or _DEFAULT_ROCK_KIND_LABELS
+    found = {i for i, name in enumerate(labels) if name in want}
+    return found if found else set(default)
 
 _ROCK_LABELS = frozenset({"rock"})
 _STRUCTURE_LABELS = frozenset({"structure", "bridge"})  # "bridge" = pre-0.9.21 dumps
+_TRANSPORT_LABELS = frozenset({"road", "path", "rail"})
 
 
 def enrichment_class_ids(
@@ -332,12 +406,26 @@ def enrichment_class_ids(
 
 
 def enrichment_overlay_ids(class_labels: list[str] | None = None) -> set[int]:
-    """Ids that should contour-suppress (rock + structure/bridge)."""
+    """Ids that get rock/structure treatment (fill/rim + protruding contour suppress)."""
     return enrichment_class_ids(
         class_labels,
         _ROCK_LABELS | _STRUCTURE_LABELS,
         default=ENRICH_OVERLAY_CLASSES,
     )
+
+
+def enrichment_transport_ids(class_labels: list[str] | None = None) -> set[int]:
+    """Road/path/rail: contour suppress + structure-style rim on class footprint (no fill)."""
+    return enrichment_class_ids(
+        class_labels,
+        _TRANSPORT_LABELS,
+        default=ENRICH_TRANSPORT_CLASSES,
+    )
+
+
+def enrichment_road_path_ids(class_labels: list[str] | None = None) -> set[int]:
+    """Alias: all transport classes that get structure-style rim (road/path/rail)."""
+    return enrichment_transport_ids(class_labels)
 
 
 def enrichment_rock_ids(class_labels: list[str] | None = None) -> set[int]:

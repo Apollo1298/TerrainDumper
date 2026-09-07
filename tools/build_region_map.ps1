@@ -42,6 +42,14 @@ if (-not (Test-Path $script)) {
     throw "Missing $script"
 }
 
+if ($Scene -eq 'BlackrockPrisonSurvivalZone') {
+    throw @"
+'$Scene' is not a final map region — it is composited into BlackrockRegion.
+Build: ./tools/build_region_map.ps1 BlackrockRegion
+(Or call make_map_bg.py directly only for debug.)
+"@
+}
+
 $dump = Join-Path $DumpRoot $Scene
 if (-not (Test-Path $dump)) {
     throw "No dump for '$Scene' at $dump. Run dump_map in that region first."

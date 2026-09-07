@@ -53,8 +53,9 @@ internal static class OrthoDump
     }
 
     /// <summary>
-    /// Problematic multi-terrain regions (e.g. Cannery/Bleak Inlet): land-only bounds,
-    /// suspend water/ice sheets, pre-look land tiles, gameplay-cam fallback for clear tiles.
+    /// Problematic multi-terrain regions (e.g. Cannery/Bleak Inlet / Blackrock): land-only bounds,
+    /// suspend water/ice Terrain sheets, player stream-wake, then ice/water mesh wake
+    /// (Blackrock WaterTerrainB/D/F under Ice_Terrrains are meshes, not Terrains).
     /// Writes ortho_color_tiled_land.png (does not overwrite classic tiled).
     /// </summary>
     public static void RunTiledLandFromConsole(int grid = DefaultTileGrid, int tileRes = DefaultTileRes)
@@ -317,6 +318,7 @@ internal static class OrthoDump
         BeginBusy();
         List<TerrainLodRestore>? lodRestore = null;
         List<BackdropRestore>? backdropRestore = null;
+        List<(LODGroup group, int prev)>? iceLodRestore = null;
         bool fogWas = RenderSettings.fog;
         float shadowDist = QualitySettings.shadowDistance;
         int pixelLight = QualitySettings.pixelLightCount;
@@ -395,6 +397,8 @@ internal static class OrthoDump
             int playerNudges = 0;
             int waterCells = 0;
             int overlapCells = 0;
+            int iceMeshNudges = 0;
+            int iceMeshCells = 0;
 
             if (landMode)
             {
@@ -522,6 +526,56 @@ internal static class OrthoDump
                     }
                 }
 
+                // Pass 3.5: ice/water meshes (not Unity Terrains) — e.g. Blackrock
+                // EP4_Blackrock_WaterTerrainB/D/F under Ice_Terrrains. Ortho cam height
+                // otherwise LODs them away; stream-wake via player teleport.
+                List<IceMeshTarget> iceMeshes = CollectIceWaterMeshTargets();
+                iceLodRestore = ForceIceMeshLods(iceMeshes);
+                if (iceMeshes.Count > 0)
+                {
+                    Msg($"Ortho land-mode: {iceMeshes.Count} ice/water mesh target(s)…");
+                    foreach (IceMeshTarget mesh in iceMeshes)
+                    {
+                        Vector3 c = mesh.WorldBounds.center;
+                        float y = c.y + 3f;
+                        Terrain? landUnder = FindLandTerrainAt(c.x, c.z);
+                        if (landUnder != null)
+                        {
+                            try { y = landUnder.SampleHeight(c) + 3f; }
+                            catch { /* keep fallback */ }
+                        }
+
+                        MelonLogger.Msg(
+                            $"Ortho land-mode: player → ice mesh {mesh.Name} ({c.x:0},{c.z:0})");
+                        yield return CoTeleportPlayerTo(new Vector3(c.x, y, c.z), _savedPlayerRot);
+                        iceMeshNudges++;
+
+                        int captured = 0;
+                        for (int tz = 0; tz < grid; tz++)
+                        {
+                            for (int tx = 0; tx < grid; tx++)
+                            {
+                                if (!AtlasCellIntersectsBounds(
+                                        squareMinX, squareMinZ, tileWorld, tx, tz, mesh.WorldBounds))
+                                    continue;
+
+                                float tcx = squareMinX + (tx + 0.5f) * tileWorld;
+                                float tcz = squareMinZ + (tz + 0.5f) * tileWorld;
+                                yield return CoCaptureAtlasCell(
+                                    camGo, cam, rt, atlas, tx, tz, tileRes,
+                                    tcx, camHeight, tcz, orthoSize, farClip,
+                                    retryIfClear: false);
+                                filled[tx, tz] = true;
+                                captured++;
+                                iceMeshCells++;
+                            }
+                        }
+
+                        MelonLogger.Msg(
+                            $"Ortho land-mode ice mesh: {mesh.Name} → {captured} cell(s)");
+                    }
+                }
+
                 // Pass 4: water-only / void cells never claimed by land.
                 for (int tz = 0; tz < grid; tz++)
                 {
@@ -540,10 +594,11 @@ internal static class OrthoDump
                     }
                 }
 
-                if (overlapCells > 0 || waterCells > 0)
+                if (overlapCells > 0 || waterCells > 0 || iceMeshCells > 0)
                 {
                     Msg(
                         $"Ortho land-mode: overlap recapture {overlapCells} cell(s), " +
+                        $"ice/water mesh {iceMeshCells} cell(s), " +
                         $"water/void fill {waterCells} cell(s)");
                 }
 
@@ -586,9 +641,13 @@ internal static class OrthoDump
             };
             if (landMode)
             {
-                notes.Add("LAND MODE: interior land (water off) → footprint-overlap shore (land+water) → water/void fill.");
                 notes.Add(
-                    $"Player nudges: {playerNudges}; overlap cells: {overlapCells}; water/void cells: {waterCells}.");
+                    "LAND MODE: interior land (water off) → footprint-overlap shore (land+water Terrains) → " +
+                    "ice/water mesh wake+recapture → water/void fill.");
+                notes.Add(
+                    $"Player nudges: {playerNudges}; overlap cells: {overlapCells}; " +
+                    $"ice mesh nudges: {iceMeshNudges}; ice mesh cells: {iceMeshCells}; " +
+                    $"water/void cells: {waterCells}.");
             }
 
             WriteMeta(new OrthoMeta
@@ -606,6 +665,8 @@ internal static class OrthoDump
                 SuspendedBackdrops = landMode ? backdropRestore?.Count : null,
                 PlayerNudges = landMode ? playerNudges : null,
                 OverlapCells = landMode ? overlapCells : null,
+                IceMeshNudges = landMode ? iceMeshNudges : null,
+                IceMeshCells = landMode ? iceMeshCells : null,
                 WaterCells = landMode ? waterCells : null,
                 TileGrid = grid,
                 TileResolution = tileRes,
@@ -653,6 +714,7 @@ internal static class OrthoDump
             CleanupCapture(camGo, rt, atlas);
             RestoreQuality(fogWas, shadowDist, pixelLight, lodBias, lodRestore);
             RestoreBackdropTerrains(backdropRestore);
+            RestoreIceMeshLods(iceLodRestore);
             EndBusy();
         }
     }
@@ -1004,11 +1066,184 @@ internal static class OrthoDump
             /* ignore */
         }
 
-        name = name.ToLowerInvariant();
-        return name.Contains("water")
-               || name.Contains("ice")
-               || name.Contains("pond")
-               || name.Contains("creek");
+        return IsBackdropName(name);
+    }
+
+    private static bool IsBackdropName(string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return false;
+        string n = name.ToLowerInvariant();
+        return n.Contains("water")
+               || n.Contains("ice")
+               || n.Contains("pond")
+               || n.Contains("creek");
+    }
+
+    /// <summary>
+    /// Mesh ice/river sheets only — excludes waterfall FX/rocks that also contain "water".
+    /// </summary>
+    private static bool IsIceWaterMeshCandidateName(string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return false;
+        string n = name.ToLowerInvariant();
+        if (n.Contains("waterfall"))
+            return false;
+        if (n.Contains("waterterrain") || n.Contains("iceterrain") || n.Contains("ice_terr"))
+            return true;
+        if (n.Contains("coastalwater") || n.Contains("coastalice"))
+            return true;
+        if ((n.Contains("water") || n.Contains("ice") || n.Contains("pond") || n.Contains("creek"))
+            && (n.Contains("terrain") || n.Contains("sheet") || n.Contains("shelf")
+                || n.Contains("backdrop") || n.Contains("mesh")))
+            return true;
+        return false;
+    }
+
+    private static bool AtlasCellIntersectsBounds(
+        float squareMinX, float squareMinZ, float tileWorld, int tx, int tz, Bounds b)
+    {
+        float cellMinX = squareMinX + tx * tileWorld;
+        float cellMinZ = squareMinZ + tz * tileWorld;
+        float cellMaxX = cellMinX + tileWorld;
+        float cellMaxZ = cellMinZ + tileWorld;
+        return cellMinX < b.max.x && cellMaxX > b.min.x && cellMinZ < b.max.z && cellMaxZ > b.min.z;
+    }
+
+    /// <summary>
+    /// Ice/water drawn as MeshRenderers (not Unity Terrain), e.g. Blackrock WaterTerrainB/D/F.
+    /// Group by highest backdrop-named ancestor that is not a Terrain component.
+    /// </summary>
+    private static List<IceMeshTarget> CollectIceWaterMeshTargets()
+    {
+        var byRoot = new Dictionary<int, IceMeshTarget>();
+        MeshRenderer[]? renderers = null;
+        try
+        {
+            renderers = UnityEngine.Object.FindObjectsOfType<MeshRenderer>(true);
+        }
+        catch (Exception ex)
+        {
+            MelonLogger.Warning($"Ortho ice-mesh scan failed: {ex.Message}");
+            return new List<IceMeshTarget>();
+        }
+
+        if (renderers == null)
+            return new List<IceMeshTarget>();
+
+        foreach (MeshRenderer mr in renderers)
+        {
+            if (mr == null)
+                continue;
+            Transform? root = FindBackdropMeshRoot(mr.transform);
+            if (root == null)
+                continue;
+            if (root.GetComponent<Terrain>() != null)
+                continue;
+
+            int id = root.GetInstanceID();
+            if (!byRoot.TryGetValue(id, out IceMeshTarget? target))
+            {
+                target = new IceMeshTarget(root, mr.bounds);
+                byRoot[id] = target;
+            }
+            else
+            {
+                Bounds b = target.WorldBounds;
+                b.Encapsulate(mr.bounds);
+                target.WorldBounds = b;
+            }
+        }
+
+        foreach (IceMeshTarget target in byRoot.Values)
+        {
+            if (target.Root == null)
+                continue;
+            LODGroup[] groups = target.Root.GetComponentsInChildren<LODGroup>(true);
+            if (groups == null)
+                continue;
+            foreach (LODGroup g in groups)
+            {
+                if (g != null)
+                    target.LodGroups.Add(g);
+            }
+        }
+
+        var list = new List<IceMeshTarget>(byRoot.Values);
+        list.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+        return list;
+    }
+
+    private static Transform? FindBackdropMeshRoot(Transform t)
+    {
+        Transform? best = null;
+        for (Transform? cur = t; cur != null; cur = cur.parent)
+        {
+            string n = cur.name ?? "";
+            string low = n.ToLowerInvariant();
+            if (IsIceWaterMeshCandidateName(n) || low.Contains("ice_terr"))
+                best = cur;
+        }
+
+        if (best == null)
+            return null;
+
+        // Prefer WaterTerrain* prefab under Ice_Terrrains folder, not the folder itself.
+        string bestLow = (best.name ?? "").ToLowerInvariant();
+        if (bestLow.Contains("ice_terr") && !IsIceWaterMeshCandidateName(best.name))
+        {
+            for (Transform? cur = t; cur != null && cur != best; cur = cur.parent)
+            {
+                if (IsIceWaterMeshCandidateName(cur.name))
+                    return cur.GetComponent<Terrain>() != null ? null : cur;
+            }
+            return null;
+        }
+
+        if (best.GetComponent<Terrain>() != null)
+            return null;
+        return best;
+    }
+
+    private static List<(LODGroup group, int prev)> ForceIceMeshLods(List<IceMeshTarget> targets)
+    {
+        var restore = new List<(LODGroup group, int prev)>();
+        if (targets == null || targets.Count == 0)
+            return restore;
+
+        var seen = new HashSet<int>();
+        foreach (IceMeshTarget target in targets)
+        {
+            foreach (LODGroup g in target.LodGroups)
+            {
+                if (g == null)
+                    continue;
+                int id = g.GetInstanceID();
+                if (!seen.Add(id))
+                    continue;
+                restore.Add((g, -1));
+                try { g.ForceLOD(0); }
+                catch { /* ignore */ }
+            }
+        }
+
+        if (restore.Count > 0)
+            Msg($"Ortho land-mode: ForceLOD(0) on {restore.Count} ice/water LODGroup(s)");
+        return restore;
+    }
+
+    private static void RestoreIceMeshLods(List<(LODGroup group, int prev)>? restore)
+    {
+        if (restore == null)
+            return;
+        foreach ((LODGroup group, int prev) in restore)
+        {
+            if (group == null)
+                continue;
+            try { group.ForceLOD(prev); }
+            catch { /* ignore */ }
+        }
     }
 
     private static List<BackdropRestore> SuspendBackdropTerrains()
@@ -1184,6 +1419,21 @@ internal static class OrthoDump
         }
     }
 
+    private sealed class IceMeshTarget
+    {
+        public readonly string Name;
+        public readonly Transform? Root;
+        public Bounds WorldBounds;
+        public readonly List<LODGroup> LodGroups = new();
+
+        public IceMeshTarget(Transform root, Bounds bounds)
+        {
+            Root = root;
+            Name = root != null ? (root.name ?? "") : "";
+            WorldBounds = bounds;
+        }
+    }
+
     private readonly struct TerrainLodRestore
     {
         public readonly Terrain Terrain;
@@ -1223,6 +1473,8 @@ internal static class OrthoDump
         [JsonPropertyName("landPreload")] public int? LandPreload { get; set; }
         [JsonPropertyName("playerNudges")] public int? PlayerNudges { get; set; }
         [JsonPropertyName("overlapCells")] public int? OverlapCells { get; set; }
+        [JsonPropertyName("iceMeshNudges")] public int? IceMeshNudges { get; set; }
+        [JsonPropertyName("iceMeshCells")] public int? IceMeshCells { get; set; }
         [JsonPropertyName("waterCells")] public int? WaterCells { get; set; }
         [JsonPropertyName("tileGrid")] public int? TileGrid { get; set; }
         [JsonPropertyName("tileResolution")] public int? TileResolution { get; set; }

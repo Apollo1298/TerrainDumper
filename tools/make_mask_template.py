@@ -13,11 +13,16 @@ Default is 2 m/px. Writes:
                                  (else DEM hillshade); north up, world grid
   masks/<Scene>/mask.json      — world bounds + pixel size sidecar
 
-Footprint AABB defaults to the primary land tile plus same-res land siblings,
-then expands to cover the fog UV world rectangle (vanilla map canvas) so painted
-masks can reach the left/right edges of non-square maps (e.g. Ravine 2:1).
-Water/ice sheets and low-res overlays do not widen the DEM crop; fog UV may.
-Within that crop, ortho texture may still fill land-DEM holes (paint guide only).
+When masks/<Scene>/mask.json already exists, regen reuses its world AABB,
+metersPerPixel, and width/height so painted mask.png stays aligned. Pass
+--recompute-bounds to derive a fresh footprint (may change size).
+
+Footprint AABB (new scenes / --recompute-bounds) defaults to the primary land
+tile plus same-res land siblings, then expands to cover the fog UV world
+rectangle (vanilla map canvas) so painted masks can reach the left/right edges
+of non-square maps (e.g. Ravine 2:1). Water/ice sheets and low-res overlays do
+not widen the DEM crop; fog UV may. Within that crop, ortho texture may still
+fill land-DEM holes (paint guide only).
 
 Then, in any image editor: paint the areas to exclude on a new layer, hide the template
 layer, and export just the painted layer as masks/<Scene>/mask.png at the same pixel size.
@@ -51,12 +56,15 @@ from mapalign import (  # noqa: E402
     resolve_map_extent,
 )
 from make_map_bg import (  # noqa: E402
+    DEFAULT_ROCK_TEXTURE_DIR,
     PUNCH_WATER_DARK_LUMA,
     PUNCH_WATER_DEEP_MAX_Y,
     PUNCH_WATER_NEAR_M,
     PUNCH_WATER_SHRINK_M,
     SHIP_OUTSIDE_RGB,
     hillshade,
+    load_rock_texture_bank,
+    paint_enrichment_rock_textures,
     punch_dark_ortho_over_elevated_enrichment,
     resolve_ortho_paths,
 )
@@ -280,7 +288,7 @@ def main() -> int:
     ap.add_argument(
         "--ortho",
         default="",
-        help="Ortho PNG stem/path (default: auto ortho_color_tiled if present)",
+        help="Ortho PNG stem/path (default: auto; BlackrockRegion/BlackrockPrisonSurvivalZone prefer ortho_color_tiled_land)",
     )
     ap.add_argument(
         "--shade-floor",
@@ -322,6 +330,22 @@ def main() -> int:
         default=PUNCH_WATER_SHRINK_M,
         help=f"Also inpaint deep-channel ortho within this many metres of rock (default {PUNCH_WATER_SHRINK_M}; 0=off)",
     )
+    ap.add_argument(
+        "--rock-textures",
+        type=Path,
+        default=DEFAULT_ROCK_TEXTURE_DIR,
+        help=f"Folder of TLD rock albedo PNGs for enrichment fill (default {DEFAULT_ROCK_TEXTURE_DIR})",
+    )
+    ap.add_argument(
+        "--no-rock-textures",
+        action="store_true",
+        help="Paint enrichment rocks as flat gray (skip TLD albedo tiles)",
+    )
+    ap.add_argument(
+        "--recompute-bounds",
+        action="store_true",
+        help="Ignore existing mask.json size; derive a fresh AABB (may break painted masks)",
+    )
     args = ap.parse_args()
 
     dump: Path = args.dump_dir
@@ -334,6 +358,10 @@ def main() -> int:
     if meta_path.exists():
         scene = load_json(meta_path).get("sceneName") or scene
 
+    masks_root: Path = args.out_dir or (Path(__file__).resolve().parent.parent / "masks")
+    out_dir = masks_root / scene
+    sidecar_path = out_dir / "mask.json"
+
     fp_stems = footprint_stems(
         dump, main_only=bool(args.main_tile_only), all_tiles=bool(args.all_tiles)
     )
@@ -342,62 +370,88 @@ def main() -> int:
         print(f"No terrain tiles in {dump}")
         return 1
 
-    min_x = min(float(m["position"]["x"]) for _, m in fp_sources)
-    min_z = min(float(m["position"]["z"]) for _, m in fp_sources)
-    max_x = max(float(m["position"]["x"]) + float(m["size"]["x"]) for _, m in fp_sources)
-    max_z = max(float(m["position"]["z"]) + float(m["size"]["z"]) for _, m in fp_sources)
-
-    if args.include_portals:
-        portals_path = dump / "portals.json"
-        if not portals_path.is_file():
-            print(f"--include-portals: no portals.json in {dump}")
-            return 1
-        portals_doc = load_json(portals_path)
-        portals = list(portals_doc.get("portals") or [])
-        if not portals:
-            print("--include-portals: portals.json has no portals[]")
-            return 1
-        pad = float(args.portal_pad_m)
-        px = [float(p["x"]) for p in portals]
-        pz = [float(p["z"]) for p in portals]
-        before = (min_x, min_z, max_x, max_z)
-        min_x = min(min_x, min(px) - pad)
-        min_z = min(min_z, min(pz) - pad)
-        max_x = max(max_x, max(px) + pad)
-        max_z = max(max_z, max(pz) + pad)
-        print(
-            f"expanded AABB for {len(portals)} portals (+{pad:g}m pad): "
-            f"X[{before[0]:.0f},{before[2]:.0f}] Z[{before[1]:.0f},{before[3]:.0f}] -> "
-            f"X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]"
-        )
-
-    if not args.no_fog_uv:
-        fog_aabb = fog_uv_world_aabb(dump)
-        if fog_aabb is None:
-            print("fog UV expand skipped (need fog_of_war.json + alignment_samples.json)")
-        else:
-            fx0, fz0, fx1, fz1 = fog_aabb
-            before = (min_x, min_z, max_x, max_z)
-            min_x = min(min_x, fx0)
-            min_z = min(min_z, fz0)
-            max_x = max(max_x, fx1)
-            max_z = max(max_z, fz1)
-            if (min_x, min_z, max_x, max_z) != before:
+    locked_bounds = False
+    if not args.recompute_bounds and sidecar_path.is_file():
+        try:
+            prev = load_json(sidecar_path)
+            min_x = float(prev["originX"])
+            min_z = float(prev["originZ"])
+            max_x = float(prev["maxX"])
+            max_z = float(prev["maxZ"])
+            mpp = float(prev["metersPerPixel"])
+            width = max(2, int(prev["width"]))
+            height = max(2, int(prev["height"]))
+            locked_bounds = True
+            if abs(float(args.meters_per_pixel) - mpp) > 1e-9:
                 print(
-                    f"expanded AABB to fog UV canvas: "
-                    f"X[{before[0]:.0f},{before[2]:.0f}] Z[{before[1]:.0f},{before[3]:.0f}] -> "
-                    f"X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]"
+                    f"locked bounds: ignoring --meters-per-pixel {args.meters_per_pixel:g} "
+                    f"(sidecar uses {mpp:g}; pass --recompute-bounds to change)"
                 )
-            else:
-                print("fog UV canvas already inside DEM footprint")
+            print(
+                f"{scene}: locked to existing mask.json "
+                f"X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}] -> "
+                f"{width}x{height} @ {mpp} m/px (footprint {', '.join(fp_stems)})"
+            )
+        except (KeyError, TypeError, ValueError, OSError) as ex:
+            print(f"existing mask.json unusable ({ex}); recomputing bounds")
 
-    mpp = float(args.meters_per_pixel)
-    width = max(2, int(np.ceil((max_x - min_x) / mpp)))
-    height = max(2, int(np.ceil((max_z - min_z) / mpp)))
-    print(
-        f"{scene}: X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}] -> "
-        f"{width}x{height} @ {mpp} m/px (footprint {', '.join(fp_stems)})"
-    )
+    if not locked_bounds:
+        min_x = min(float(m["position"]["x"]) for _, m in fp_sources)
+        min_z = min(float(m["position"]["z"]) for _, m in fp_sources)
+        max_x = max(float(m["position"]["x"]) + float(m["size"]["x"]) for _, m in fp_sources)
+        max_z = max(float(m["position"]["z"]) + float(m["size"]["z"]) for _, m in fp_sources)
+
+        if args.include_portals:
+            portals_path = dump / "portals.json"
+            if not portals_path.is_file():
+                print(f"--include-portals: no portals.json in {dump}")
+                return 1
+            portals_doc = load_json(portals_path)
+            portals = list(portals_doc.get("portals") or [])
+            if not portals:
+                print("--include-portals: portals.json has no portals[]")
+                return 1
+            pad = float(args.portal_pad_m)
+            px = [float(p["x"]) for p in portals]
+            pz = [float(p["z"]) for p in portals]
+            before = (min_x, min_z, max_x, max_z)
+            min_x = min(min_x, min(px) - pad)
+            min_z = min(min_z, min(pz) - pad)
+            max_x = max(max_x, max(px) + pad)
+            max_z = max(max_z, max(pz) + pad)
+            print(
+                f"expanded AABB for {len(portals)} portals (+{pad:g}m pad): "
+                f"X[{before[0]:.0f},{before[2]:.0f}] Z[{before[1]:.0f},{before[3]:.0f}] -> "
+                f"X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]"
+            )
+
+        if not args.no_fog_uv:
+            fog_aabb = fog_uv_world_aabb(dump)
+            if fog_aabb is None:
+                print("fog UV expand skipped (need fog_of_war.json + alignment_samples.json)")
+            else:
+                fx0, fz0, fx1, fz1 = fog_aabb
+                before = (min_x, min_z, max_x, max_z)
+                min_x = min(min_x, fx0)
+                min_z = min(min_z, fz0)
+                max_x = max(max_x, fx1)
+                max_z = max(max_z, fz1)
+                if (min_x, min_z, max_x, max_z) != before:
+                    print(
+                        f"expanded AABB to fog UV canvas: "
+                        f"X[{before[0]:.0f},{before[2]:.0f}] Z[{before[1]:.0f},{before[3]:.0f}] -> "
+                        f"X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]"
+                    )
+                else:
+                    print("fog UV canvas already inside DEM footprint")
+
+        mpp = float(args.meters_per_pixel)
+        width = max(2, int(np.ceil((max_x - min_x) / mpp)))
+        height = max(2, int(np.ceil((max_z - min_z) / mpp)))
+        print(
+            f"{scene}: X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}] -> "
+            f"{width}x{height} @ {mpp} m/px (footprint {', '.join(fp_stems)})"
+        )
 
     wx = min_x + (np.arange(width) + 0.5) * mpp
     # Row 0 is max Z so the template reads north-up.
@@ -430,6 +484,9 @@ def main() -> int:
     enrich_class: np.ndarray | None = None
     protect_ids: set[int] | None = None
     rock_ids: set[int] | None = None
+    enrich_rock_kinds: np.ndarray | None = None
+    enrich_rock_snow: np.ndarray | None = None
+    enrich_rock_kind_labels: list[str] | None = None
     loaded = load_enrichment(dump)
     if loaded is not None:
         emeters, _emask, emeta = loaded
@@ -446,7 +503,30 @@ def main() -> int:
             labels = emeta.get("classLabels")
             protect_ids = enrichment_structure_ids(labels)
             rock_ids = enrichment_rock_ids(labels)
+        rock_kinds = emeta.get("rockKinds")
+        if rock_kinds is not None:
+            rk = sample_source(rock_kinds.astype(np.float64), emeta, wx_grid, wz_grid)
+            enrich_rock_kinds = np.zeros(rk.shape, dtype=np.uint8)
+            rk_ok = np.isfinite(rk)
+            enrich_rock_kinds[rk_ok] = np.rint(rk[rk_ok]).astype(np.uint8)
+            enrich_rock_kind_labels = [str(x) for x in (emeta.get("rockKindLabels") or [])]
+        rock_snow = emeta.get("rockSnow")
+        if rock_snow is not None:
+            rs = sample_source(rock_snow.astype(np.float64), emeta, wx_grid, wz_grid)
+            enrich_rock_snow = np.zeros(rs.shape, dtype=np.uint8)
+            rs_ok = np.isfinite(rs)
+            enrich_rock_snow[rs_ok] = (rs[rs_ok] != 0).astype(np.uint8)
         print("merged enrichment inside footprint")
+
+    rock_bank: dict[str, np.ndarray] = {}
+    if not args.no_rock_textures:
+        rock_bank = load_rock_texture_bank(args.rock_textures)
+        if rock_bank:
+            print(f"rock textures: {len(rock_bank)} from {args.rock_textures}")
+        else:
+            print(f"rock textures: none in {args.rock_textures} (flat fill)")
+    else:
+        print("rock textures: off (--no-rock-textures)")
 
     inset_m = 0.0
     if args.inset_m is not None:
@@ -470,7 +550,7 @@ def main() -> int:
     floor = float(np.clip(args.shade_floor, 0.0, 0.95))
     shade_soft = floor + shade * (1.0 - floor)
 
-    ortho_paths = None if args.no_ortho else resolve_ortho_paths(dump, args.ortho)
+    ortho_paths = None if args.no_ortho else resolve_ortho_paths(dump, args.ortho, scene=scene)
     if ortho_paths is not None:
         ortho_path, meta_path = ortho_paths
         orgb = np.asarray(Image.open(ortho_path).convert("RGB"), dtype=np.uint8)
@@ -508,6 +588,20 @@ def main() -> int:
         show = valid | ovalid
         ortho_fill = ovalid & ~valid
         out[~show] = SHIP_OUTSIDE_RGB
+        # Match make_map_bg raw/color pre-post: textured enrichment rocks over ortho.
+        if enrich_class is not None and rock_ids:
+            rock_on = show & np.isin(enrich_class, list(rock_ids))
+            if rock_on.any():
+                status = paint_enrichment_rock_textures(
+                    out,
+                    rock_on,
+                    shade_soft,
+                    rock_kinds=enrich_rock_kinds,
+                    rock_kind_labels=enrich_rock_kind_labels,
+                    rock_snow=enrich_rock_snow,
+                    texture_bank=rock_bank,
+                )
+                print(f"enrichment rock fill over ortho: {status}")
         print(
             f"ortho x hillshade {ortho_path.name} "
             f"(coverage {use.mean()*100:.1f}%, ortho-fill {ortho_fill.mean()*100:.1f}%, "
@@ -525,16 +619,26 @@ def main() -> int:
         grey = np.clip((0.35 * tone + 0.65 * shade) * 235 + 10, 0, 255)
         rgb = np.repeat(np.nan_to_num(grey)[..., None], 3, axis=2)
         rgb[~valid] = SHIP_OUTSIDE_RGB
+        if enrich_class is not None and rock_ids:
+            rock_on = valid & np.isin(enrich_class, list(rock_ids))
+            if rock_on.any():
+                status = paint_enrichment_rock_textures(
+                    rgb,
+                    rock_on,
+                    shade_soft,
+                    rock_kinds=enrich_rock_kinds,
+                    rock_kind_labels=enrich_rock_kind_labels,
+                    rock_snow=enrich_rock_snow,
+                    texture_bank=rock_bank,
+                )
+                print(f"enrichment rock fill over hillshade: {status}")
 
     img = Image.fromarray(rgb.astype(np.uint8), "RGB")
 
     draw_grid(img, min_x, min_z, max_z, mpp, args.grid_minor_m, args.grid_major_m)
 
-    masks_root: Path = args.out_dir or (Path(__file__).resolve().parent.parent / "masks")
-    out_dir = masks_root / scene
     out_dir.mkdir(parents=True, exist_ok=True)
     template_path = out_dir / "template.png"
-    sidecar_path = out_dir / "mask.json"
     paint_path = out_dir / "mask.png"
     img.save(template_path)
     sidecar_path.write_text(
@@ -553,7 +657,10 @@ def main() -> int:
                 "notes": [
                     "Paint areas to EXCLUDE from the map, then export that layer alone.",
                     "Opaque (or non-black without alpha) = excluded.",
-                    "Template prefers ortho_color_tiled x hillshade when present in the dump.",
+                    "Template prefers ortho_color_tiled x hillshade when present in the dump "
+                    "(BlackrockRegion / BlackrockPrisonSurvivalZone prefer ortho_color_tiled_land).",
+                    "Enrichment rockKinds/rockSnow paint TLD albedo tiles (same as color map pre-post).",
+                    "Regen reuses this sidecar AABB/size unless --recompute-bounds.",
                     "Footprint AABB = primary land DEM (+ same-res land siblings), then fog UV canvas.",
                     "Water/ice do not widen the DEM crop; fog UV may expand past it (vanilla aspect).",
                     "Within that crop, ortho pixels may fill land-DEM holes (paint guide only).",

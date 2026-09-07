@@ -4,8 +4,9 @@ Generate exclusion-mask paint templates from TerrainDumper dumps.
 
 .DESCRIPTION
 Runs tools/make_mask_template.py for each dump under DumpRoot (or for the
-scene names you pass). Always overwrites masks/<Scene>/template.png and
-mask.json. Does not touch painted mask.png files.
+scene names you pass). Always overwrites masks/<Scene>/template.png and mask.json (bounds/size are
+preserved from existing mask.json unless you pass --recompute-bounds). Does not
+touch painted mask.png files.
 
 .EXAMPLE
 ./tools/make_mask_templates.ps1
