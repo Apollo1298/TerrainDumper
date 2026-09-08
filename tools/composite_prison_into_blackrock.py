@@ -18,6 +18,7 @@ sys.path.insert(0, str(TOOLS))
 
 import make_map_bg as mm  # noqa: E402
 import blackrock_prison_composite as bpc  # noqa: E402
+from tld_paths import require_dump_root  # noqa: E402
 from mapalign import (  # noqa: E402
     collect_samples,
     fit_affine,
@@ -37,7 +38,8 @@ def main() -> int:
     ap.add_argument(
         "--dump-root",
         type=Path,
-        default=Path(r"I:\SteamLibrary\steamapps\common\TheLongDark\Mods\TerrainDumper"),
+        default=None,
+        help="Dump folder (default: $TERRAIN_DUMPER_ROOT or $TLD_PATH/Mods/TerrainDumper)",
     )
     ap.add_argument("--size", type=int, default=4096)
     ap.add_argument("--out", type=Path, default=None)
@@ -78,6 +80,7 @@ def main() -> int:
         help="Flat rock fill instead of tiled albedos",
     )
     args = ap.parse_args()
+    args.dump_root = args.dump_root or require_dump_root()
 
     outdoor = args.dump_root / bpc.OUTDOOR_SCENE
     out = args.out or (

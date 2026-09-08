@@ -13,8 +13,16 @@ DEFAULT_CONFIG = REPO / "tools" / "pathfinding_config.json"
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
+    import sys
+
+    tools_dir = str(REPO / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    from tld_paths import resolve_dump_root
+
     p = path or DEFAULT_CONFIG
     cfg = json.loads(p.read_text(encoding="utf-8"))
+    cfg["dumpRoot"] = str(resolve_dump_root(config_value=cfg.get("dumpRoot") or ""))
     masks = Path(cfg["masksRoot"])
     if not masks.is_absolute():
         cfg["masksRoot"] = str((REPO / masks).resolve())

@@ -1,5 +1,5 @@
 {
-  "dumpRoot": "I:/SteamLibrary/steamapps/common/TheLongDark/Mods/TerrainDumper",
+  "dumpRoot": "",
   "masksRoot": "masks",
   "outRoot": "out/graphs",
   "occupancyCellMeters": 4.0,

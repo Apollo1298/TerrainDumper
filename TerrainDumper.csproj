@@ -10,8 +10,9 @@
 		<AssemblyName>TerrainDumper</AssemblyName>
 	</PropertyGroup>
 
+	<!-- PostBuild copies DLL into game Mods/ when TLD_PATH (or TheLongDarkPath) is set. -->
 	<PropertyGroup>
-		<TheLongDarkPath>I:\SteamLibrary\steamapps\common\TheLongDark</TheLongDarkPath>
+		<TheLongDarkPath Condition="'$(TheLongDarkPath)' == ''">$(TLD_PATH)</TheLongDarkPath>
 	</PropertyGroup>
 
 	<ItemGroup>

@@ -13,7 +13,7 @@ Writes:
 Usage:
   python tools/stamp_template_pois.py
   python tools/stamp_template_pois.py --scene AshCanyonRegion CanneryRegion
-  python tools/stamp_template_pois.py --game-path \"I:/SteamLibrary/steamapps/common/TheLongDark\"
+  python tools/stamp_template_pois.py --game-path \"$TLD_PATH\"
 """
 
 from __future__ import annotations
@@ -33,7 +33,8 @@ except ImportError:
     raise SystemExit(1)
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_GAME = Path(r"I:\SteamLibrary\steamapps\common\TheLongDark")
+sys.path.insert(0, str(REPO / "tools"))
+from tld_paths import require_tld_path  # noqa: E402
 
 # Harvestables / clutter that also carry MapDetail — not charcoal named POIs.
 SKIP_SPRITES = {
@@ -792,7 +793,12 @@ def stamp_scene(
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Stamp charcoal map icons onto mask templates")
-    ap.add_argument("--game-path", type=Path, default=DEFAULT_GAME)
+    ap.add_argument(
+        "--game-path",
+        type=Path,
+        default=None,
+        help="TLD install root (default: $TLD_PATH)",
+    )
     ap.add_argument("--masks", type=Path, default=REPO / "masks")
     ap.add_argument("--out-dir", type=Path, default=REPO / "out")
     ap.add_argument("--scene", nargs="*", default=None, help="Only these scene folder names")
@@ -805,6 +811,7 @@ def main() -> int:
     )
     ap.add_argument("--rescan", action="store_true", help="Ignore cached out/map_pois.json")
     args = ap.parse_args()
+    args.game_path = args.game_path or require_tld_path()
     try:
         parts = [int(x.strip()) for x in args.icon_color.split(",")]
         if len(parts) != 3 or any(c < 0 or c > 255 for c in parts):

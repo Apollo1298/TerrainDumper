@@ -93,9 +93,11 @@ Built against Il2Cpp assemblies package `2.51.0` (same baseline as DetailedMaps)
 
 ## Install
 
-1. Build (`dotnet build -c Release`), or copy `bin/Release/net6.0/TerrainDumper.dll`.
-2. Place into game `Mods/` (csproj PostBuild copies to `I:\SteamLibrary\steamapps\common\TheLongDark\Mods` if present).
-3. Ensure `DeveloperConsole.dll` is also in `Mods`.
+1. Set `TLD_PATH` to your game install folder (e.g. `...\steamapps\common\TheLongDark`). Optionally set `TERRAIN_DUMPER_ROOT` if dumps live elsewhere (defaults to `%TLD_PATH%\Mods\TerrainDumper`).
+2. Build (`dotnet build -c Release`), or copy `bin/Release/net6.0/TerrainDumper.dll`.
+3. Place into game `Mods/` (PostBuild copies there when `TLD_PATH` is set and `Mods` exists).
+4. Ensure `DeveloperConsole.dll` is also in `Mods`.
+5. Offline Python tools: `pip install -r requirements.txt`
 
 ## Dump output (`formatVersion` 2)
 
@@ -131,7 +133,7 @@ python tools/preview_heights.py path/to/<Scene>
 python tools/check_alignment.py path/to/<Scene> path/to/map_bg.png alignment_check.png
 ```
 
-Needs `numpy` + `Pillow` (+ `scipy` for inset/mask grow).
+Needs `numpy` + `Pillow` (+ `scipy` for inset/mask grow); see `requirements.txt`. Build scripts resolve the dump folder from `TLD_PATH` / `TERRAIN_DUMPER_ROOT` (or `-DumpRoot`).
 
 ### `make_map_bg` notes
 

@@ -20,13 +20,15 @@ Use -Jobs N to run up to N regions at once (default: min(4, CPU count)).
 
 .EXAMPLE
 ./tools/run_map_bg_all_color.ps1 LongRailTransitionZone AshCanyonRegion
+
+Requires TLD_PATH or TERRAIN_DUMPER_ROOT (or -DumpRoot).
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Scenes,
 
-    [string]$DumpRoot = 'I:\SteamLibrary\steamapps\common\TheLongDark\Mods\TerrainDumper',
+    [string]$DumpRoot = '',
 
     [string]$OutDir,
 
@@ -37,6 +39,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_ResolveTldPaths.ps1')
+$DumpRoot = Get-TerrainDumperRoot -DumpRoot $DumpRoot
+
 $repo = Split-Path -Parent $PSScriptRoot
 $script = Join-Path $PSScriptRoot 'make_map_bg.py'
 if (-not (Test-Path $script)) { throw "Missing $script" }

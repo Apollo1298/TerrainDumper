@@ -16,13 +16,15 @@ touch painted mask.png files.
 
 .EXAMPLE
 ./tools/make_mask_templates.ps1 -MetersPerPixel 2
+
+Requires TLD_PATH or TERRAIN_DUMPER_ROOT (or -DumpRoot).
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Scenes,
 
-    [string]$DumpRoot = 'I:\SteamLibrary\steamapps\common\TheLongDark\Mods\TerrainDumper',
+    [string]$DumpRoot = '',
 
     [double]$MetersPerPixel = 2.0,
 
@@ -30,6 +32,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_ResolveTldPaths.ps1')
+$DumpRoot = Get-TerrainDumperRoot -DumpRoot $DumpRoot
 
 $repo = Split-Path -Parent $PSScriptRoot
 $script = Join-Path $PSScriptRoot 'make_mask_template.py'

@@ -8,8 +8,8 @@ Usage:
 
 Example:
   python check_alignment.py ^
-    "I:/SteamLibrary/steamapps/common/TheLongDark/Mods/TerrainDumper/LakeRegion" ^
-    "F:/Github/DetailedMaps/Maps/map_bg_LakeRegion_new.png" ^
+    "%TERRAIN_DUMPER_ROOT%/LakeRegion" ^
+    path/to/map_bg_LakeRegion_new.png ^
     alignment_check.png
 """
 

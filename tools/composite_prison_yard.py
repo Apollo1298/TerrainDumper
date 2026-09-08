@@ -20,6 +20,7 @@ from scipy import ndimage
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from tld_paths import require_dump_root  # noqa: E402
 from mapalign import (  # noqa: E402
     apply_affine,
     collect_samples,
@@ -140,7 +141,8 @@ def main() -> int:
     ap.add_argument(
         "--dump-root",
         type=Path,
-        default=Path(r"I:\SteamLibrary\steamapps\common\TheLongDark\Mods\TerrainDumper"),
+        default=None,
+        help="Dump folder (default: $TERRAIN_DUMPER_ROOT or $TLD_PATH/Mods/TerrainDumper)",
     )
     ap.add_argument("--size", type=int, default=4096)
     ap.add_argument("--dilate-px", type=int, default=16, help="Wall dilate to seal gaps before hole-fill")
@@ -157,6 +159,7 @@ def main() -> int:
         default=ROOT / "out" / "maps",
     )
     args = ap.parse_args()
+    args.dump_root = args.dump_root or require_dump_root()
 
     outdoor = args.dump_root / "BlackrockRegion"
     prison = args.dump_root / "BlackrockPrisonSurvivalZone"

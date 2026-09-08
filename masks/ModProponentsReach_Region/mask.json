@@ -1,0 +1,25 @@
+﻿{
+    "sceneName":  "ModProponentsReach_Region",
+    "originX":  -1081.081034651527,
+    "originZ":  -1081.0810790023152,
+    "maxX":  1081.0810560908988,
+    "maxZ":  1081.0810809594072,
+    "metersPerPixel":  2.0,
+    "width":  1082,
+    "height":  1082,
+    "rowOrder":  "row 0 = maxZ (north up)",
+    "maskFile":  "mask.png",
+    "notes":  [
+                  "Paint areas to EXCLUDE from the map, then export that layer alone.",
+                  "Opaque (or non-black without alpha) = excluded.",
+                  "Template prefers ortho_color_tiled x hillshade when present in the dump.",
+                  "Enrichment rockKinds/rockSnow paint TLD albedo tiles (same as color map pre-post).",
+                  "Regen reuses this sidecar AABB/size unless --recompute-bounds.",
+                  "Footprint AABB = primary land DEM (+ same-res land siblings), then fog UV canvas.",
+                  "Water/ice do not widen the DEM crop; fog UV may expand past it (vanilla aspect).",
+                  "Within that crop, ortho pixels may fill land-DEM holes (paint guide only).",
+                  "Optional --include-portals expands AABB past DEM to cover LoadScene markers.",
+                  "Optional --no-fog-uv keeps DEM footprint only.",
+                  "Mask must match width/height above; make_map_bg.py loads masks/\u003cScene\u003e/mask.png."
+              ]
+}

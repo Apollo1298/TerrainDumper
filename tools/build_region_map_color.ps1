@@ -13,6 +13,8 @@ out\maps_color (or -OutDir).
 
 .EXAMPLE
 ./tools/build_region_map_color.ps1 AshCanyonRegion -Size 8192
+
+Requires TLD_PATH or TERRAIN_DUMPER_ROOT (or -DumpRoot).
 #>
 [CmdletBinding()]
 param(
@@ -21,7 +23,7 @@ param(
 
     [int]$Size = 4096,
 
-    [string]$DumpRoot = 'I:\SteamLibrary\steamapps\common\TheLongDark\Mods\TerrainDumper',
+    [string]$DumpRoot = '',
 
     [string]$OutDir,
 
@@ -32,6 +34,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_ResolveTldPaths.ps1')
+$DumpRoot = Get-TerrainDumperRoot -DumpRoot $DumpRoot
 
 $repo = Split-Path -Parent $PSScriptRoot
 $script = Join-Path $PSScriptRoot 'make_map_bg.py'

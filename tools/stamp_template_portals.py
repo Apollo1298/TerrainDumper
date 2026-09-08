@@ -6,7 +6,7 @@ Writes masks/<Scene>/template_portals.png — does not overwrite template.png.
 
 Usage:
   python tools/stamp_template_portals.py --scene AirfieldRegion AshCanyonRegion
-  python tools/stamp_template_portals.py --dump-root \"I:/SteamLibrary/.../Mods/TerrainDumper\"
+  python tools/stamp_template_portals.py --dump-root \"$TERRAIN_DUMPER_ROOT\"
 """
 
 from __future__ import annotations
@@ -19,7 +19,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULT_DUMP = Path("I:/SteamLibrary/steamapps/common/TheLongDark/Mods/TerrainDumper")
+sys.path.insert(0, str(REPO / "tools"))
+from tld_paths import resolve_dump_root  # noqa: E402
+
 CFG_PATH = REPO / "tools" / "pathfinding_config.json"
 
 # TransitionContact / region doors vs interior load triggers.
@@ -28,16 +30,13 @@ INTERIOR_RGB = (255, 196, 0)  # amber (matches prior POI stamp)
 
 
 def load_dump_root(cli: Path | None) -> Path:
-    if cli is not None:
-        return cli
+    config_value = None
     if CFG_PATH.is_file():
         try:
-            root = json.loads(CFG_PATH.read_text(encoding="utf-8")).get("dumpRoot")
-            if root:
-                return Path(root)
+            config_value = json.loads(CFG_PATH.read_text(encoding="utf-8")).get("dumpRoot")
         except (OSError, json.JSONDecodeError):
             pass
-    return DEFAULT_DUMP
+    return resolve_dump_root(cli, config_value=config_value)
 
 
 def world_to_pixel(

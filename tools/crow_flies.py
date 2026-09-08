@@ -42,8 +42,12 @@ _NEIGH8 = (
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
+    sys.path.insert(0, str(ROOT / "tools"))
+    from tld_paths import resolve_dump_root
+
     p = path or DEFAULT_CONFIG
     cfg = json.loads(p.read_text(encoding="utf-8"))
+    cfg["dumpRoot"] = str(resolve_dump_root(config_value=cfg.get("dumpRoot") or ""))
     masks = Path(cfg.get("masksRoot", "masks"))
     if not masks.is_absolute():
         cfg["masksRoot"] = str((ROOT / masks).resolve())

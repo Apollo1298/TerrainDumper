@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Extract TLD rock albedos for map rock-fill textures."""
+"""Extract TLD rock albedos for map rock-fill textures.
+
+Requires TLD_PATH (or --game-path) and UnityPy.
+"""
 from __future__ import annotations
 
+import argparse
+import sys
 from pathlib import Path
 
 import UnityPy
 
-GAME = Path(r"I:\SteamLibrary\steamapps\common\TheLongDark")
-OUT = Path(__file__).resolve().parent.parent / "out" / "textures" / "tld_rock_samples"
-BUNDLE_ROOT = GAME / "tld_Data" / "StreamingAssets" / "aa" / "StandaloneWindows64"
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tools"))
+from tld_paths import require_tld_path  # noqa: E402
+
+OUT = REPO / "out" / "textures" / "tld_rock_samples"
 
 WANT = {
     "TRN_Rock04",
@@ -34,11 +41,22 @@ def tex_name(data) -> str:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--game-path",
+        type=Path,
+        default=None,
+        help="TLD install root (default: $TLD_PATH)",
+    )
+    args = ap.parse_args()
+    game = args.game_path or require_tld_path()
+    bundle_root = game / "tld_Data" / "StreamingAssets" / "aa" / "StandaloneWindows64"
+
     OUT.mkdir(parents=True, exist_ok=True)
     # Prefer the known global-texture bundle first, then scan the rest.
-    preferred = BUNDLE_ROOT / "06fe64a087041e406a76f4539374d751.bundle"
+    preferred = bundle_root / "06fe64a087041e406a76f4539374d751.bundle"
     bundles = ([preferred] if preferred.exists() else []) + [
-        p for p in sorted(BUNDLE_ROOT.glob("*.bundle")) if p != preferred
+        p for p in sorted(bundle_root.glob("*.bundle")) if p != preferred
     ]
     found: set[str] = set()
     for i, path in enumerate(bundles):

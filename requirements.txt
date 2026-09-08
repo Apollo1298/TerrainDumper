@@ -1,0 +1,6 @@
+numpy>=1.24
+Pillow>=10.0
+scipy>=1.10
+
+# Optional (asset stamp / rock extract tools):
+# UnityPy>=1.10

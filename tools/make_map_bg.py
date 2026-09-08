@@ -27,10 +27,9 @@ Usage:
 
 Example:
   python tools/make_map_bg.py ^
-    "I:/SteamLibrary/steamapps/common/TheLongDark/Mods/TerrainDumper/LakeRegion" ^
+    "%TERRAIN_DUMPER_ROOT%/LakeRegion" ^
     --size 4096 ^
-    --baseline "F:/Github/DetailedMaps/Maps/map_bg_LakeRegion_new.png" ^
-    --out "F:/Github/TerrainDumper/out/maps/map_bg_LakeRegion_new.png"
+    --out "out/maps/map_bg_LakeRegion_new.png"
 """
 
 from __future__ import annotations
