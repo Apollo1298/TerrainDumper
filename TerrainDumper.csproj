@@ -13,6 +13,7 @@
 	<!-- PostBuild copies DLL into game Mods/ when TLD_PATH (or TheLongDarkPath) is set. -->
 	<PropertyGroup>
 		<TheLongDarkPath Condition="'$(TheLongDarkPath)' == ''">$(TLD_PATH)</TheLongDarkPath>
+		<Il2CppAssembliesPath>$(TheLongDarkPath)\MelonLoader\Il2CppAssemblies</Il2CppAssembliesPath>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -26,8 +27,17 @@
 
 	<ItemGroup>
 		<PackageReference Include="LavaGang.MelonLoader" Version="0.7.2" />
-		<PackageReference Include="STBlade.Modding.TLD.Il2CppAssemblies.Windows" Version="2.51.0" />
+		<!-- 2.55 NuGet for BCL-safe refs; Assembly-CSharp swapped to local 2.59 below. -->
+		<PackageReference Include="STBlade.Modding.TLD.Il2CppAssemblies.Windows" Version="2.55.0" />
 	</ItemGroup>
+
+	<!-- Game is 2.59; NuGet tops at 2.55 which still has old FogOfWar sync API. -->
+	<Target Name="UseLocalAssemblyCSharp" AfterTargets="ResolveAssemblyReferences">
+		<ItemGroup>
+			<ReferencePath Remove="@(ReferencePath)" Condition="'%(Filename)' == 'Assembly-CSharp'" />
+			<ReferencePath Include="$(Il2CppAssembliesPath)\Assembly-CSharp.dll" />
+		</ItemGroup>
+	</Target>
 
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="Exists('$(TheLongDarkPath)/Mods')">
 		<!-- Best-effort copy; ignore if game has the DLL locked -->

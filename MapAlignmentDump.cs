@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using Il2Cpp;
 using MelonLoader;
 using UnityEngine;
+using UnityEngine.ResourceManagement.AsyncOperations;
 
 namespace TerrainDumper;
 
@@ -116,22 +117,20 @@ internal static class MapAlignmentDump
         dst.SceneRadius = fog.m_SceneRadius;
         dst.MapRadius = fog.m_MapRadius;
 
-        Texture2D? bg = fog.m_MapBackground;
-        if (bg != null)
+        // TLD 2.59+: textures live on Addressables handles (m_MapBackground etc. removed).
+        if (TryTextureFromHandle(fog, fog.m_MapBackgroundHandle, out Texture2D? bg) && bg != null)
         {
             dst.MapBackgroundWidth = bg.width;
             dst.MapBackgroundHeight = bg.height;
         }
 
-        Texture2D? details = fog.m_MapDetails;
-        if (details != null)
+        if (TryTextureFromHandle(fog, fog.m_MapDetailsHandle, out Texture2D? details) && details != null)
         {
             dst.MapDetailsWidth = details.width;
             dst.MapDetailsHeight = details.height;
         }
 
-        Texture2D? height = fog.m_Heightmap;
-        if (height != null)
+        if (TryTextureFromHandle(fog, fog.m_HeightmapHandle, out Texture2D? height) && height != null)
         {
             dst.HeightmapWidth = height.width;
             dst.HeightmapHeight = height.height;
@@ -140,6 +139,28 @@ internal static class MapAlignmentDump
         MelonLogger.Msg(
             $"FogOfWar: bg='{dst.MapBackgroundFilename}' scale={fog.m_HeightmapScale} offset={fog.m_HeightmapOffset} " +
             $"sceneR={fog.m_SceneRadius} mapR={fog.m_MapRadius}");
+    }
+
+    private static bool TryTextureFromHandle(
+        FogOfWar fog,
+        AsyncOperationHandle<Texture2D> handle,
+        out Texture2D? texture)
+    {
+        texture = null;
+        try
+        {
+            if (fog.TryGetTextureFromHandle(handle, out Texture2D tex) && tex != null)
+            {
+                texture = tex;
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            MelonLogger.Warning($"FogOfWar texture handle read failed: {ex.Message}");
+        }
+
+        return false;
     }
 
     private static void WriteSamples(

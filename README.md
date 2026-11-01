@@ -10,21 +10,20 @@ Every ship map goes through four steps. Exclusion masks are **required** for eve
 1. In-game dump          dump_map
 2. Mask template         make_mask_templates.ps1  →  masks/<Scene>/template.png
 3. Paint mask (manual)   export exclude layer     →  masks/<Scene>/mask.png
-4. Build map             build_region_map.ps1       →  out/maps/map_bg_<Scene>_new.png
-                         build_region_map_color.ps1 →  out/maps_color/map_bg_<Scene>_color.png
+4. Build base map        build_region_map_base.ps1 →  out/maps_base/map_bg_<Scene>_new.png
 ```
+
+Charcoal / color presentation (desat, grain, void look) is applied by **DetailedMaps** at runtime. This repo’s default export is the **base** image (levels + color balance + edge/mask fade).
 
 ```mermaid
 flowchart LR
   Dump["1. In-game: dump_map"] --> Raw["Dump folder"]
   Raw --> Tpl["2. make_mask_templates.ps1"]
   Tpl --> Paint["3. Paint masks/Scene/mask.png"]
-  Raw --> Build["4. build_region_map.ps1"]
-  Raw --> BuildColor["4b. build_region_map_color.ps1"]
+  Raw --> Build["4. build_region_map_base.ps1"]
   Paint --> Build
-  Paint --> BuildColor
-  Build --> Out["out/maps/map_bg_Scene_new.png"]
-  BuildColor --> OutColor["out/maps_color/map_bg_Scene_color.png"]
+  Build --> Out["out/maps_base/map_bg_Scene_new.png"]
+  Out --> DM["DetailedMaps in-game style"]
 ```
 
 ### 1. Dump a region
@@ -69,39 +68,30 @@ Paint areas to **exclude** on a new layer, hide the template, export that layer 
 
 ### 4. Build the map
 
-**Charcoal / legacy ship** (full desat; same cool dim-gray void as color):
+**Default — base for DetailedMaps** (levels + color balance + fade; no grid/grain/desat/vignette):
+
+```text
+./tools/build_region_map_base.ps1 CoastalRegion
+./tools/build_region_map_base.ps1 LakeRegion
+./tools/run_map_bg_all_base.ps1
+```
+
+→ `out/maps_base/map_bg_<Scene>_new.png`.
+
+**Local charcoal / color previews** (optional; DetailedMaps normally owns this look):
 
 ```text
 ./tools/build_region_map.ps1 CoastalRegion
-./tools/build_region_map.ps1 LakeRegion
-```
-
-→ `out/maps/map_bg_<Scene>_new.png`.
-
-**Color / vintage** (80% chroma; same levels + void fade 80→black 300 m):
-
-```text
-./tools/build_region_map_color.ps1 LongRailTransitionZone
 ./tools/build_region_map_color.ps1 AshCanyonRegion
-./tools/run_map_bg_all_color.ps1
-```
-
-→ `out/maps_color/map_bg_<Scene>_color.png`.
-
-**No-grid variants** (identical look, `--no-grid`):
-
-```text
 ./tools/build_region_map_nogrid.ps1 CoastalRegion
 ./tools/build_region_map_color_nogrid.ps1 AshCanyonRegion
-./tools/run_map_bg_all_nogrid.ps1
-./tools/run_map_bg_all_color_nogrid.ps1
 ```
 
-→ `out/maps_nogrid/map_bg_<Scene>_new.png` and `out/maps_color_nogrid/map_bg_<Scene>_color.png`.
+→ `out/maps/`, `out/maps_color/`, `out/maps_nogrid*`.
 
 All fail if the painted mask is missing. (`make_map_bg.py --no-mask` is debug-only.)
 
-Copy into DetailedMaps and rebuild that mod manually.
+Copy the **base** PNG into DetailedMaps and rebuild that mod manually.
 
 ---
 
@@ -112,7 +102,7 @@ This repository includes the dump mod, the offline map-building tools, and exclu
 It does **not** include game data or finished maps. To produce maps you also need:
 
 - *The Long Dark* (Survival mode) — terrain and map metadata come from the live game
-- [MelonLoader](https://github.com/LavaGang/MelonLoader) **0.7.2** — loads TerrainDumper in-game
+- [MelonLoader](https://github.com/LavaGang/MelonLoader) **0.7.2+** — loads TerrainDumper in-game
 - [Developer Console](https://github.com/FINDarkside/TLD-Developer-Console) — required to run console commands (F1)
 - A dump for each region you want to build (created in-game with `dump_map`; stored under the game `Mods/TerrainDumper` folder and not committed to git)
 - Environment variable `TLD_PATH` set to your game install directory (or `TERRAIN_DUMPER_ROOT` if dumps live elsewhere)
@@ -121,7 +111,7 @@ It does **not** include game data or finished maps. To produce maps you also nee
 
 A complete `dump_map` run writes height data, fog-of-war and alignment metadata, plus optional enrichment and top-down imagery used by the map builder. Painted masks live in this repo (`masks/<Scene>/mask.png`). Generated map images under `out/` stay on your machine.
 
-Compatible with Il2Cpp assemblies package `2.51.0` (same baseline as DetailedMaps). Tested on game **2.55**.
+Requires game **2.59+** (FogOfWar textures load via Addressables handles). The project references NuGet Il2Cpp assemblies **2.55** and swaps in the local MelonLoader `Assembly-CSharp.dll` from `TLD_PATH` at build time.
 
 ## Install
 
@@ -139,7 +129,7 @@ Compatible with Il2Cpp assemblies package `2.51.0` (same baseline as DetailedMap
 | `terrain_NN_heights.raw` | LE `uint16` heights; `round(normalized * 65535)` |
 | `terrain_NN_meta.json` | Resolution, size, transform, world bounds |
 | `terrain_NN_preview.png` | Grayscale quick-look |
-| `fog_of_war.json` | FogOfWar scales/offsets/radii |
+| `fog_of_war.json` | FogOfWar scales/offsets/radii (open charcoal map once before dump) |
 | `alignment_samples.json` | `WorldPositionToMapPosition` samples |
 | `enrichment_*.raw` / `enrichment_meta.json` | Collider raycast heights + HitClass; v4 adds `enrichment_rock_kind.raw` / `enrichment_rock_snow.raw` |
 | `ortho_color_tiled/` | Tiled top-down color capture |
@@ -155,35 +145,35 @@ Normalized height → meters ≈ `normalized * size.y + position.y`.
 python tools/make_mask_template.py path/to/<Scene>
 python tools/make_map_bg.py path/to/<Scene> --size 4096 --out out/maps/map_bg_<Scene>_new.png
 python tools/make_map_bg.py path/to/<Scene> --size 4096 --pipeline color --out out/maps_color/map_bg_<Scene>_color.png
+./tools/build_region_map_base.ps1 <Scene>
+./tools/run_map_bg_all_base.ps1
 ./tools/build_region_map.ps1 <Scene>
 ./tools/build_region_map_color.ps1 <Scene>
 ./tools/build_region_map_nogrid.ps1 <Scene>
 ./tools/build_region_map_color_nogrid.ps1 <Scene>
-./tools/run_map_bg_all.ps1
-./tools/run_map_bg_all.ps1 -Jobs 1
-./tools/run_map_bg_all_color.ps1
-./tools/run_map_bg_all_color.ps1 -Jobs 2
-./tools/run_map_bg_all_nogrid.ps1
-./tools/run_map_bg_all_color_nogrid.ps1
 python tools/preview_heights.py path/to/<Scene>
 python tools/check_alignment.py path/to/<Scene> path/to/map_bg.png alignment_check.png
 python tools/make_fow_config.py path/to/<Scene>
 python tools/make_fow_config.py path/to/MountainPassRegion --validate
+python tools/synth_alignment_from_fow.py path/to/<Scene>
 ```
 
 Needs `numpy` + `Pillow` (+ `scipy` for inset/mask grow); see `requirements.txt`. Build scripts resolve the dump folder from `TLD_PATH` / `TERRAIN_DUMPER_ROOT` (or `-DumpRoot`).
 
-### Offline FOW config (`make_fow_config.py`)
+### Offline FOW config (`make_fow_config.py` / `synth_alignment_from_fow.py`)
 
-Derives companion-ready FogOfWar scalars from DEM meta. `sceneRadius` = half-diagonal of the playable-land AABB union. Emits `mapRadiusConstant` (Panel_Map.MAP_RADIUS=300 for charcoal UV) separately from `mapRadius` (FogOfWar.m_MapRadius≈900). Writes `<dump>/fow.json` and `masks/<Scene>/fow.json`. Shipping/enabling FOW in-game is a separate companion step.
+For **Mod** scenes (and offline framing), `make_fow_config.py` derives FogOfWar scalars from DEM meta. `sceneRadius` = half-diagonal of the playable-land AABB union. Emits `mapRadiusConstant` (Panel_Map.MAP_RADIUS=300 for charcoal UV) separately from `mapRadius` (FogOfWar.m_MapRadius≈900). Writes `<dump>/fow.json` and `masks/<Scene>/fow.json`. `synth_alignment_from_fow.py` builds a matching `alignment_samples.json` from that config. Shipping/enabling FOW in-game is a separate companion step.
+
+On vanilla regions, prefer live `fog_of_war.json` + `alignment_samples.json` from `dump_map` after opening the charcoal map once (TLD **2.59**+).
 
 ### `make_map_bg` notes
 
-- Two presentation pipelines share the same DEM/ortho/enrichment/mask/rock-texture path:
-  - `--pipeline charcoal` (default): full desaturate → shared levels (gamma 0.72, in_high 150) → cool dim-gray void `(48,51,51)`/`(67,71,72)` → grid/stipple/vignette/grain.
-  - `--pipeline color`: keep 80% chroma → same levels → same void tint → same grid/grain/etc.
-  - No-grid wrappers (`build_region_map_*_nogrid.ps1` / `run_map_bg_all_*_nogrid.ps1`) pass `--no-grid` and write to `out/maps_nogrid` or `out/maps_color_nogrid`.
-- Ship default size: **4096** wide, height from fog UV aspect. Void: edge fade 80 m then black over 300 m; signed-distance blur 36 m.
+- Default export for DetailedMaps is **base** (`build_region_map_base.ps1`: levels + color balance + fade; no grid/grain/desat/vignette).
+- Optional local presentation pipelines share the same DEM/ortho/enrichment/mask/rock-texture path:
+  - `--pipeline charcoal`: full desaturate → shared levels → cool dim-gray void → grid/stipple/vignette/grain.
+  - `--pipeline color`: keep 80% chroma → same levels → same void tint → same overlays.
+  - No-grid wrappers pass `--no-grid` and write to `out/maps_nogrid` or `out/maps_color_nogrid`.
+- Default size: **4096** wide, height from fog UV aspect. Void: edge fade 80 m then black/alpha over 300 m; signed-distance blur 36 m.
 - Rock fill uses TLD albedo tiles from `out/textures/tld_rock_samples/` when present (`--no-rock-textures` for flat fill).
 - Auto-uses `ortho_color_tiled` + enrichment when present.
 - Border = terrain DEM footprint; enrichment merges **inside** only.
