@@ -2,11 +2,11 @@
 """Apply GIMP-style Levels (Value channel) to a map_bg PNG.
 
 Default params match the ship / GIMP "map" preset:
-  input low=0, gamma=0.52, high=117; output 0..225
+  input low=0, gamma=0.72, high=150; output 0..180
 
 Usage:
   python tools/apply_levels.py in.png [--out out.png]
-      [--in-low 0] [--gamma 0.52] [--in-high 117] [--out-high 225]
+      [--in-low 0] [--gamma 0.72] [--in-high 150] [--out-high 180]
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ def apply_levels_value(
     img: Image.Image,
     *,
     in_low: float = 0.0,
-    gamma: float = 0.52,
-    in_high: float = 117.0,
+    gamma: float = 0.72,
+    in_high: float = 150.0,
     out_low: float = 0.0,
-    out_high: float = 225.0,
+    out_high: float = 180.0,
 ) -> Image.Image:
     """GIMP Levels on HSV Value (same as RGB max for grayscale/near-gray)."""
     rgba = img.mode == "RGBA"
@@ -54,10 +54,10 @@ def main() -> int:
     ap.add_argument("input", type=Path, help="Input PNG")
     ap.add_argument("--out", type=Path, default=None, help="Output PNG (default: <stem>_levels.png)")
     ap.add_argument("--in-low", type=float, default=0.0)
-    ap.add_argument("--gamma", type=float, default=0.52)
-    ap.add_argument("--in-high", type=float, default=117.0)
+    ap.add_argument("--gamma", type=float, default=0.72)
+    ap.add_argument("--in-high", type=float, default=150.0)
     ap.add_argument("--out-low", type=float, default=0.0)
-    ap.add_argument("--out-high", type=float, default=225.0)
+    ap.add_argument("--out-high", type=float, default=180.0)
     args = ap.parse_args()
 
     src = args.input

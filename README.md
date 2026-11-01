@@ -2,8 +2,6 @@
 
 MelonLoader utility mod for *The Long Dark*. Dumps Unity terrain heightmaps and map-alignment metadata from the **currently loaded** region so charcoal-style maps can be built offline (no photogrammetry).
 
-See [GOALS.md](GOALS.md) for the original historical roadmap (ship docs are this README).
-
 ## Workflow
 
 Every ship map goes through four steps. Exclusion masks are **required** for every region.
@@ -31,12 +29,25 @@ flowchart LR
 
 ### 1. Dump a region
 
-1. Launch TLD with MelonLoader.
-2. Load Survival → enter the region.
-3. **Open the charcoal map once** (so `FogOfWar` populates), then close it.
-4. Press **F1** and run `dump_map` (optional args: `dump_map [enrichCellMeters] [orthoGrid] [tileRes]`).
+Dumps the **active scene only**. Travel into each region (or transition zone) and run the pipeline again; there is no batch dump.
 
-Writes to `Mods/TerrainDumper/<SceneName>/`: terrain heights, `fog_of_war.json`, `alignment_samples.json`, enrichment, then forces **noon** and captures tiled ortho.
+1. Launch TLD with MelonLoader + [Developer Console](https://github.com/FINDarkside/TLD-Developer-Console) (required — F1 / `uConsole`).
+2. Load Survival → enter the region you want.
+3. **Open the charcoal map once** (so `FogOfWar` + alignment populate), then close it.
+4. Press **F1** and run:
+
+```text
+dump_map
+dump_map [enrichCellMeters] [orthoGrid] [tileRes]
+```
+
+Defaults: **0.25 m** enrichment cell, **8×8** ortho grid, **1024** px tiles. Pipeline order: terrain (+ fog/alignment) → enrichment names @ 2 m → enrichment → tiled ortho (forces **noon**).
+
+Writes to `Mods/TerrainDumper/<SceneName>/`. Enrichment at 0.25 m is the large step (often hundreds of MB–GB per region and can take a long time); leave the game alone until it finishes.
+
+**Done when** the console shows `TerrainDumper: dump_map COMPLETE → …/<SceneName>`. Progress lines are `[1/4]`…`[4/4]`. Abort lines look like `dump_map ABORT — …` (check MelonLoader log). If fog/alignment is thin you get a WARNING to open the charcoal map and re-run — do not treat that as success for ship maps.
+
+Re-running `dump_map` while one is already in progress is ignored (`dump_map already in progress…`).
 
 ### 2–3. Exclusion mask
 
@@ -50,15 +61,15 @@ Default **2 m/px**. Always overwrites `template.png` / `mask.json`; does not tou
 
 ```text
 masks/<Scene>/
-  template.png   # hillshade + world grid (paint guide)
+  template.png   # hillshade + world grid (paint guide; regenerable, not in git)
   mask.json      # world bounds + pixel size
 ```
 
-Paint areas to **exclude** on a new layer, hide the template, export that layer alone as `masks/<Scene>/mask.png` at the same pixel size. Opaque (or non-black without alpha) = excluded.
+Paint areas to **exclude** on a new layer, hide the template, export that layer alone as `masks/<Scene>/mask.png` at the same pixel size. Opaque (or non-black without alpha) = excluded. This repo ships painted `mask.png` files; regenerate templates locally when you need them.
 
 ### 4. Build the map
 
-**Charcoal / legacy ship** (full desat, brown edge tint):
+**Charcoal / legacy ship** (full desat; same cool dim-gray void as color):
 
 ```text
 ./tools/build_region_map.ps1 CoastalRegion
@@ -67,7 +78,7 @@ Paint areas to **exclude** on a new layer, hide the template, export that layer 
 
 → `out/maps/map_bg_<Scene>_new.png`.
 
-**Color / vintage** (70% chroma, soft levels, cool dim-gray edge; same void fade 80→black 300 m):
+**Color / vintage** (80% chroma; same levels + void fade 80→black 300 m):
 
 ```text
 ./tools/build_region_map_color.ps1 LongRailTransitionZone
@@ -77,7 +88,18 @@ Paint areas to **exclude** on a new layer, hide the template, export that layer 
 
 → `out/maps_color/map_bg_<Scene>_color.png`.
 
-Both fail if the painted mask is missing. (`make_map_bg.py --no-mask` is debug-only.)
+**No-grid variants** (identical look, `--no-grid`):
+
+```text
+./tools/build_region_map_nogrid.ps1 CoastalRegion
+./tools/build_region_map_color_nogrid.ps1 AshCanyonRegion
+./tools/run_map_bg_all_nogrid.ps1
+./tools/run_map_bg_all_color_nogrid.ps1
+```
+
+→ `out/maps_nogrid/map_bg_<Scene>_new.png` and `out/maps_color_nogrid/map_bg_<Scene>_color.png`.
+
+All fail if the painted mask is missing. (`make_map_bg.py --no-mask` is debug-only.)
 
 Copy into DetailedMaps and rebuild that mod manually.
 
@@ -85,19 +107,29 @@ Copy into DetailedMaps and rebuild that mod manually.
 
 ## Requirements
 
-- *The Long Dark* (Survival)
-- [MelonLoader](https://github.com/LavaGang/MelonLoader) **0.7.2**
-- [Developer Console](https://github.com/FINDarkside/TLD-Developer-Console) (enables Hinterland `uConsole`; F1)
+This repository includes the dump mod, the offline map-building tools, and exclusion masks for each region under `masks/`.
 
-Built against Il2Cpp assemblies package `2.51.0` (same baseline as DetailedMaps). Tested on game **2.55**.
+It does **not** include game data or finished maps. To produce maps you also need:
+
+- *The Long Dark* (Survival mode) — terrain and map metadata come from the live game
+- [MelonLoader](https://github.com/LavaGang/MelonLoader) **0.7.2** — loads TerrainDumper in-game
+- [Developer Console](https://github.com/FINDarkside/TLD-Developer-Console) — required to run console commands (F1)
+- A dump for each region you want to build (created in-game with `dump_map`; stored under the game `Mods/TerrainDumper` folder and not committed to git)
+- Environment variable `TLD_PATH` set to your game install directory (or `TERRAIN_DUMPER_ROOT` if dumps live elsewhere)
+- Python packages from `requirements.txt` for the offline tools
+- .NET 6 SDK to build the mod DLL (or use a pre-built `TerrainDumper.dll`)
+
+A complete `dump_map` run writes height data, fog-of-war and alignment metadata, plus optional enrichment and top-down imagery used by the map builder. Painted masks live in this repo (`masks/<Scene>/mask.png`). Generated map images under `out/` stay on your machine.
+
+Compatible with Il2Cpp assemblies package `2.51.0` (same baseline as DetailedMaps). Tested on game **2.55**.
 
 ## Install
 
 1. Set `TLD_PATH` to your game install folder (e.g. `...\steamapps\common\TheLongDark`). Optionally set `TERRAIN_DUMPER_ROOT` if dumps live elsewhere (defaults to `%TLD_PATH%\Mods\TerrainDumper`).
 2. Build (`dotnet build -c Release`), or copy `bin/Release/net6.0/TerrainDumper.dll`.
-3. Place into game `Mods/` (PostBuild copies there when `TLD_PATH` is set and `Mods` exists).
-4. Ensure `DeveloperConsole.dll` is also in `Mods`.
-5. Offline Python tools: `pip install -r requirements.txt`
+3. Place the DLL into the game `Mods/` folder (PostBuild does this when `TLD_PATH` is set and `Mods` exists).
+4. Install Developer Console into `Mods/` as well (`DeveloperConsole.dll`).
+5. Install Python dependencies: `pip install -r requirements.txt`.
 
 ## Dump output (`formatVersion` 2)
 
@@ -125,21 +157,32 @@ python tools/make_map_bg.py path/to/<Scene> --size 4096 --out out/maps/map_bg_<S
 python tools/make_map_bg.py path/to/<Scene> --size 4096 --pipeline color --out out/maps_color/map_bg_<Scene>_color.png
 ./tools/build_region_map.ps1 <Scene>
 ./tools/build_region_map_color.ps1 <Scene>
+./tools/build_region_map_nogrid.ps1 <Scene>
+./tools/build_region_map_color_nogrid.ps1 <Scene>
 ./tools/run_map_bg_all.ps1
 ./tools/run_map_bg_all.ps1 -Jobs 1
 ./tools/run_map_bg_all_color.ps1
 ./tools/run_map_bg_all_color.ps1 -Jobs 2
+./tools/run_map_bg_all_nogrid.ps1
+./tools/run_map_bg_all_color_nogrid.ps1
 python tools/preview_heights.py path/to/<Scene>
 python tools/check_alignment.py path/to/<Scene> path/to/map_bg.png alignment_check.png
+python tools/make_fow_config.py path/to/<Scene>
+python tools/make_fow_config.py path/to/MountainPassRegion --validate
 ```
 
 Needs `numpy` + `Pillow` (+ `scipy` for inset/mask grow); see `requirements.txt`. Build scripts resolve the dump folder from `TLD_PATH` / `TERRAIN_DUMPER_ROOT` (or `-DumpRoot`).
 
+### Offline FOW config (`make_fow_config.py`)
+
+Derives companion-ready FogOfWar scalars from DEM meta. `sceneRadius` = half-diagonal of the playable-land AABB union. Emits `mapRadiusConstant` (Panel_Map.MAP_RADIUS=300 for charcoal UV) separately from `mapRadius` (FogOfWar.m_MapRadius≈900). Writes `<dump>/fow.json` and `masks/<Scene>/fow.json`. Shipping/enabling FOW in-game is a separate companion step.
+
 ### `make_map_bg` notes
 
 - Two presentation pipelines share the same DEM/ortho/enrichment/mask/rock-texture path:
-  - `--pipeline charcoal` (default): full desaturate → charcoal levels → brown edge tint → grid/stipple/vignette/grain.
-  - `--pipeline color`: keep 70% chroma → softer levels → cool dim-gray edge `(48,51,51)`/`(67,71,72)` → same grid/grain/etc.
+  - `--pipeline charcoal` (default): full desaturate → shared levels (gamma 0.72, in_high 150) → cool dim-gray void `(48,51,51)`/`(67,71,72)` → grid/stipple/vignette/grain.
+  - `--pipeline color`: keep 80% chroma → same levels → same void tint → same grid/grain/etc.
+  - No-grid wrappers (`build_region_map_*_nogrid.ps1` / `run_map_bg_all_*_nogrid.ps1`) pass `--no-grid` and write to `out/maps_nogrid` or `out/maps_color_nogrid`.
 - Ship default size: **4096** wide, height from fog UV aspect. Void: edge fade 80 m then black over 300 m; signed-distance blur 36 m.
 - Rock fill uses TLD albedo tiles from `out/textures/tld_rock_samples/` when present (`--no-rock-textures` for flat fill).
 - Auto-uses `ortho_color_tiled` + enrichment when present.
@@ -149,20 +192,25 @@ Needs `numpy` + `Pillow` (+ `scipy` for inset/mask grow); see `requirements.txt`
 
 ### Other in-game commands
 
-| Command | Hotkey | What |
-|---|---|---|
-| `dump_ortho_tiled [grid] [tileRes]` | **F8** | Classic tiled hi-LOD ortho (+ fog kill) |
-| `dump_ortho_tiled_land [grid] [tileRes]` | — | Land-mode: player stream-wake land pass (water off) + water/void remainder into same atlas → `ortho_color_tiled_land.png` |
-| `dump_enrichment [cellMeters]` | **F10** | Collider heights (default 0.25 m) |
-| `dump_ortho` / `dump_ortho_clean` | F11 / F12 | Single-shot ortho |
-| `dump_walkable [cellMeters] [rasterize]` | **F2** | NavMesh triangulation (+ optional XZ raster; default cell 4, raster 1). Also runs `dump_portals`. |
-| `dump_portals` | | `LoadScene` contacts + ExitPoint/EnterPoint markers → `portals.json` |
+| Command | What |
+|---|---|
+| `dump_ortho_tiled [grid] [tileRes]` | Classic tiled hi-LOD ortho (+ fog kill); defaults 8 / 1024 |
+| `dump_ortho_tiled_land [grid] [tileRes]` | Land-mode: player stream-wake land pass (water off) + water/void remainder into same atlas → `ortho_color_tiled_land.png` |
+| `dump_enrichment [cellMeters]` | Collider heights (default 0.25 m) |
+| `dump_enrichment_all [cellMeters] [rowsPerFrame] [scenes…]` | Unattended OnUpdate batch: load each region, wait ready/terrain, `dump_enrichment`, next. Defaults match `dump_climbing_all` scene list. Keeps ticking while unfocused. `dump_enrichment_all_abort` cancels (aborts in-progress region). |
+| `dump_ortho` / `dump_ortho_clean` | Single-shot ortho |
+| `dump_walkable [cellMeters] [rasterize]` | NavMesh triangulation (+ optional XZ raster; default cell 4, raster 1). Also runs `dump_portals`. |
+| `dump_portals` | `LoadScene` contacts + ExitPoint/EnterPoint markers → `portals.json` |
+| `dump_pois` | `DisplayLocationLabel` + `MapDetail` positions → `pois.json` |
+| `dump_fallen_logs` | Fallen / bridge / tree-log prop roots (name-matched) → `fallen_logs.json` (broad kinds for offline filter; not part of `dump_map`) |
+| `dump_climbing` | Rope climbs + scramble climbs (with length) → `climbing.json` (not part of `dump_map`) |
+| `dump_climbing_all [scenes…]` | Unattended: load each region (`LoadSceneWithLoadingScreen` / `scene`), wait ready, `dump_climbing`, next. No args = outdoor/transition list including `BlackrockPrisonSurvivalZone`. `dump_climbing_all_abort` cancels after the current scene. |
 
-Trees/walkable are not part of the ship pipeline. Individual dump commands still work alongside `dump_map`.
+No dump hotkeys — console only (accidental F-keys were overwriting dumps). Trees/walkable are not part of the ship pipeline. Individual dump commands still work alongside `dump_map`.
 
 ## Safety
 
-Read-only: no `SetHeights`, no save/settings mutation.
+Most dumps are read-only: no `SetHeights`, no save/settings mutation. `dump_climbing_all` / `dump_enrichment_all` **do** change scenes (same as console `scene`).
 
 ## Build
 

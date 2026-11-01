@@ -17,6 +17,9 @@ touch painted mask.png files.
 .EXAMPLE
 ./tools/make_mask_templates.ps1 -MetersPerPixel 2
 
+.EXAMPLE
+./tools/make_mask_templates.ps1 CoastalRegion -TrimEmptyFog -RecomputeBounds
+
 Requires TLD_PATH or TERRAIN_DUMPER_ROOT (or -DumpRoot).
 #>
 [CmdletBinding()]
@@ -28,7 +31,13 @@ param(
 
     [double]$MetersPerPixel = 2.0,
 
-    [string]$OutDir
+    [string]$OutDir,
+
+    [switch]$TrimEmptyFog,
+
+    [switch]$NoFogUv,
+
+    [switch]$RecomputeBounds
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,6 +88,9 @@ foreach ($dump in $targets) {
         '--meters-per-pixel', $MetersPerPixel,
         '--out-dir', $masksRoot
     )
+    if ($TrimEmptyFog) { $argList += '--trim-empty-fog' }
+    if ($NoFogUv) { $argList += '--no-fog-uv' }
+    if ($RecomputeBounds) { $argList += '--recompute-bounds' }
     & python @argList
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "make_mask_template failed for $scene (exit $LASTEXITCODE)"

@@ -21,8 +21,10 @@ Footprint AABB (new scenes / --recompute-bounds) defaults to the primary land
 tile plus same-res land siblings, then expands to cover the fog UV world
 rectangle (vanilla map canvas) so painted masks can reach the left/right edges
 of non-square maps (e.g. Ravine 2:1). Water/ice sheets and low-res overlays do
-not widen the DEM crop; fog UV may. Within that crop, ortho texture may still
-fill land-DEM holes (paint guide only).
+not widen the DEM crop; fog UV may. Opt-in --trim-empty-fog skips that expand
+when the fog UV AABB is disjoint from the DEM (Mod scenes with Ash Canyon FOW
+fallback). --no-fog-uv keeps DEM footprint only. Within that crop, ortho texture
+may still fill land-DEM holes (paint guide only).
 
 Then, in any image editor: paint the areas to exclude on a new layer, hide the template
 layer, and export just the painted layer as masks/<Scene>/mask.png at the same pixel size.
@@ -120,6 +122,15 @@ def fog_uv_world_aabb(dump: Path) -> tuple[float, float, float, float] | None:
         float(world[:, 0].max()),
         float(world[:, 1].max()),
     )
+
+
+def aabb_intersects(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    """True if world XZ AABBs (minX, minZ, maxX, maxZ) overlap (edges count)."""
+    ax0, az0, ax1, az1 = a
+    bx0, bz0, bx1, bz1 = b
+    return ax0 <= bx1 and ax1 >= bx0 and az0 <= bz1 and az1 >= bz0
 
 
 def footprint_stems(dump: Path, *, main_only: bool, all_tiles: bool) -> list[str]:
@@ -283,6 +294,15 @@ def main() -> int:
         action="store_true",
         help="Do not expand AABB to the fog UV / vanilla map canvas (DEM footprint only)",
     )
+    ap.add_argument(
+        "--trim-empty-fog",
+        action="store_true",
+        help=(
+            "Opt-in: expand to fog UV only when that AABB intersects the DEM footprint. "
+            "Skips disjoint fog padding (e.g. Mod dumps with Ash Canyon FOW fallback). "
+            "Ignored when --no-fog-uv is set."
+        ),
+    )
     ap.add_argument("--inset-m", type=float, default=None, help="Match make_map_bg --inset-m")
     ap.add_argument("--inset-frac", type=float, default=None, help="Match make_map_bg --inset-frac")
     ap.add_argument(
@@ -430,20 +450,28 @@ def main() -> int:
             if fog_aabb is None:
                 print("fog UV expand skipped (need fog_of_war.json + alignment_samples.json)")
             else:
+                dem_aabb = (min_x, min_z, max_x, max_z)
                 fx0, fz0, fx1, fz1 = fog_aabb
-                before = (min_x, min_z, max_x, max_z)
-                min_x = min(min_x, fx0)
-                min_z = min(min_z, fz0)
-                max_x = max(max_x, fx1)
-                max_z = max(max_z, fz1)
-                if (min_x, min_z, max_x, max_z) != before:
+                if args.trim_empty_fog and not aabb_intersects(dem_aabb, fog_aabb):
                     print(
-                        f"expanded AABB to fog UV canvas: "
-                        f"X[{before[0]:.0f},{before[2]:.0f}] Z[{before[1]:.0f},{before[3]:.0f}] -> "
-                        f"X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]"
+                        f"trim-empty-fog: skipped disjoint fog UV "
+                        f"X[{fx0:.0f},{fx1:.0f}] Z[{fz0:.0f},{fz1:.0f}] "
+                        f"(DEM X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}])"
                     )
                 else:
-                    print("fog UV canvas already inside DEM footprint")
+                    before = dem_aabb
+                    min_x = min(min_x, fx0)
+                    min_z = min(min_z, fz0)
+                    max_x = max(max_x, fx1)
+                    max_z = max(max_z, fz1)
+                    if (min_x, min_z, max_x, max_z) != before:
+                        print(
+                            f"expanded AABB to fog UV canvas: "
+                            f"X[{before[0]:.0f},{before[2]:.0f}] Z[{before[1]:.0f},{before[3]:.0f}] -> "
+                            f"X[{min_x:.0f},{max_x:.0f}] Z[{min_z:.0f},{max_z:.0f}]"
+                        )
+                    else:
+                        print("fog UV canvas already inside DEM footprint")
 
         mpp = float(args.meters_per_pixel)
         width = max(2, int(np.ceil((max_x - min_x) / mpp)))
@@ -666,6 +694,7 @@ def main() -> int:
                     "Within that crop, ortho pixels may fill land-DEM holes (paint guide only).",
                     "Optional --include-portals expands AABB past DEM to cover LoadScene markers.",
                     "Optional --no-fog-uv keeps DEM footprint only.",
+                    "Optional --trim-empty-fog expands to fog UV only when it intersects the DEM.",
                     "Mask must match width/height above; make_map_bg.py loads masks/<Scene>/mask.png.",
                 ],
             },

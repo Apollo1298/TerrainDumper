@@ -9,7 +9,7 @@ namespace TerrainDumper;
 
 public class Implementation : MelonMod
 {
-    public const string ModVersion = "0.9.38";
+    public const string ModVersion = "0.9.46";
 
     private static bool _commandsRegistered;
 
@@ -19,57 +19,18 @@ public class Implementation : MelonMod
     {
         MelonLogger.Msg($"Version {ModVersion} loaded (heavy types deferred).");
         MelonLogger.Msg($"Output root: {Path.Combine(MelonEnvironment.ModsDirectory, "TerrainDumper")}");
-        MelonLogger.Msg("Hotkeys: F9 terrain | F10 enrichment | F8 tiled ortho | dump_map = terrain→names→enrich→ortho");
+        MelonLogger.Msg("Console only (no dump hotkeys): dump_map = terrain→names→enrich→ortho");
     }
 
     public override void OnUpdate()
     {
         TryRegisterCommands();
 
+        if (EnrichmentBatchDump.IsBatchRunning)
+            EnrichmentBatchDump.Tick();
+
         if (EnrichmentTicksEnabled)
             EnrichmentDump.Tick();
-
-        if (Input.GetKeyDown(KeyCode.F9))
-        {
-            MelonLogger.Msg("F9 → dump_terrain");
-            TerrainDump.RunFromConsole();
-        }
-
-        if (Input.GetKeyDown(KeyCode.F3))
-        {
-            MelonLogger.Msg("F3 → dump_trees");
-            TreeDump.RunFromConsole();
-        }
-
-        if (Input.GetKeyDown(KeyCode.F2))
-        {
-            MelonLogger.Msg("F2 → dump_walkable");
-            WalkableDump.Run();
-        }
-
-        if (Input.GetKeyDown(KeyCode.F10))
-        {
-            MelonLogger.Msg("F10 → dump_enrichment");
-            EnrichmentDump.Run();
-        }
-
-        if (Input.GetKeyDown(KeyCode.F11))
-        {
-            MelonLogger.Msg("F11 → dump_ortho");
-            InvokeOrtho(clean: false);
-        }
-
-        if (Input.GetKeyDown(KeyCode.F12))
-        {
-            MelonLogger.Msg("F12 → dump_ortho_clean");
-            InvokeOrtho(clean: true);
-        }
-
-        if (Input.GetKeyDown(KeyCode.F8))
-        {
-            MelonLogger.Msg("F8 → dump_ortho_tiled");
-            InvokeOrthoTiled(grid: 8, tileRes: 1024);
-        }
 
         if (Input.GetKeyDown(KeyCode.F1) && Input.GetKey(KeyCode.LeftShift))
         {
@@ -94,8 +55,17 @@ public class Implementation : MelonMod
             uConsole.RegisterCommand("dump_enrichment_probe", new Action(OnDumpEnrichmentProbe));
             uConsole.RegisterCommand("dump_enrichment_leak", new Action(OnDumpEnrichmentLeak));
             uConsole.RegisterCommand("dump_enrichment_names", new Action(OnDumpEnrichmentNames));
+            uConsole.RegisterCommand("dump_enrichment_all", new Action(EnrichmentBatchDump.RunAllFromConsole));
+            uConsole.RegisterCommand("dump_enrichment_all_mods", new Action(EnrichmentBatchDump.RunAllModsFromConsole));
+            uConsole.RegisterCommand("dump_enrichment_all_abort", new Action(EnrichmentBatchDump.AbortAllFromConsole));
             uConsole.RegisterCommand("dump_walkable", new Action(OnDumpWalkable));
             uConsole.RegisterCommand("dump_portals", new Action(PortalDump.RunFromConsole));
+            uConsole.RegisterCommand("dump_pois", new Action(PoisDump.RunFromConsole));
+            uConsole.RegisterCommand("dump_fallen_logs", new Action(FallenLogsDump.RunFromConsole));
+            uConsole.RegisterCommand("dump_climbing", new Action(ClimbingDump.RunFromConsole));
+            uConsole.RegisterCommand("dump_climbing_all", new Action(ClimbingDump.RunAllFromConsole));
+            uConsole.RegisterCommand("dump_climbing_all_mods", new Action(ClimbingDump.RunAllModsFromConsole));
+            uConsole.RegisterCommand("dump_climbing_all_abort", new Action(ClimbingDump.AbortAllFromConsole));
             uConsole.RegisterCommand("dump_map", new Action(OnDumpMap));
             uConsole.RegisterCommand("dump_ortho", new Action(OnDumpOrtho));
             uConsole.RegisterCommand("dump_ortho_clean", new Action(OnDumpOrthoClean));
@@ -103,7 +73,7 @@ public class Implementation : MelonMod
             uConsole.RegisterCommand("dump_ortho_tiled_land", new Action(OnDumpOrthoTiledLand));
             uConsole.RegisterCommand("force_visible", new Action(OnForceVisible));
             _commandsRegistered = true;
-            MelonLogger.Msg("Registered: dump_map, dump_terrain, dump_enrichment*, dump_ortho/tiled/tiled_land, dump_walkable, dump_portals, …");
+            MelonLogger.Msg("Registered: dump_map, dump_terrain, dump_enrichment[_all/_mods], dump_ortho/tiled/tiled_land, dump_walkable, dump_portals, dump_pois, dump_fallen_logs, dump_climbing[_all/_mods], …");
         }
         catch (Exception ex)
         {

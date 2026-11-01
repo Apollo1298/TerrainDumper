@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -11,10 +12,70 @@ from PIL import Image
 # Image framing in Panel_Map space: (mx0, my0, mx1, my1)
 MapExtent = tuple[float, float, float, float]
 
+# Panel_Map.MAP_RADIUS — charcoal texture UV uses ±(this / detailScale).
+# Distinct from FogOfWar.m_MapRadius (usually 900), which is a different field.
+PANEL_MAP_RADIUS = 300.0
+
 
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
+
+def scene_name_for_dump(dump: Path) -> str:
+    meta_path = dump / "meta.json"
+    if meta_path.exists():
+        name = load_json(meta_path).get("sceneName")
+        if name:
+            return str(name)
+    return dump.name
+
+
+def is_mod_scene(name: str) -> bool:
+    return name.startswith("Mod") and not name.endswith("_Region")
+
+
+def find_fow_config_path(dump: Path, fow_config: Path | None = None) -> Path | None:
+    """Resolve fow.json: explicit path, dump folder, or repo masks/<Scene>/fow.json."""
+    if fow_config is not None:
+        return fow_config if fow_config.is_file() else None
+    dump_fow = dump / "fow.json"
+    if dump_fow.is_file():
+        return dump_fow
+    scene = scene_name_for_dump(dump)
+    masks_fow = Path(__file__).resolve().parent.parent / "masks" / scene / "fow.json"
+    if masks_fow.is_file():
+        return masks_fow
+    return None
+
+
+def fog_dump_matches_scene(fog: dict, scene: str) -> bool:
+    """False when fog_of_war.json is an Ash Canyon / first-dict fallback for a Mod dump."""
+    key = fog.get("fogOfWarDictionaryKey") or ""
+    if not key:
+        # Older dumps omit the key; treat as matching when sceneName agrees.
+        fog_scene = fog.get("sceneName") or ""
+        return not fog_scene or str(fog_scene).casefold() == scene.casefold()
+    return str(key).casefold() == scene.casefold()
+
+
+def fow_config_as_fog(fow: dict) -> dict:
+    """
+    Adapt make_fow_config / TldevMaps fow.json into the shape map_extent_from_fog expects.
+
+    mapRadiusConstant = Panel_Map.MAP_RADIUS (300), NOT FogOfWar.m_MapRadius (mapRadius≈900).
+    """
+    mrc = fow.get("mapRadiusConstant")
+    if mrc is None:
+        mrc = PANEL_MAP_RADIUS
+    return {
+        "mapRadiusConstant": float(mrc),
+        "detailScale": fow.get("detailScale") or {"x": 1.0, "y": 1.0},
+        "sceneRadius": fow.get("sceneRadius"),
+        "mapRadius": fow.get("mapRadius"),
+        "sceneName": fow.get("sceneName"),
+        "unionBounds": fow.get("unionBounds"),
+        "_source": "fow.json",
+    }
 
 def fit_affine(world_xz: np.ndarray, map_xy: np.ndarray) -> np.ndarray:
     n = world_xz.shape[0]
@@ -113,7 +174,24 @@ def collect_samples(samples: dict, prefer_tile: str | None = None) -> tuple[np.n
     return np.asarray(pts_w, dtype=np.float64), np.asarray(pts_m, dtype=np.float64)
 
 
-def load_fog(dump: Path) -> dict | None:
+def load_fog(
+    dump: Path,
+    *,
+    fow_config: Path | None = None,
+    prefer_fow: bool = False,
+) -> dict | None:
+    """
+    Load fog scalars for map UV framing.
+
+    Default (vanilla pipeline): fog_of_war.json only.
+    Opt-in Mod path: prefer_fow=True loads fow.json (make_fow_config / TldevMaps).
+    """
+    if prefer_fow:
+        fow_path = find_fow_config_path(dump, fow_config)
+        if fow_path is None:
+            return None
+        return fow_config_as_fog(load_json(fow_path))
+
     path = dump / "fog_of_war.json"
     if not path.exists():
         return None
@@ -133,6 +211,8 @@ def map_extent_from_fog(fog: dict, map_radius: float | None = None) -> MapExtent
     FogOfWar.m_DetailScale < 1 expands the map range covered by the full texture
     (LakeRegion: 300/0.925 ≈ 324). Empirically matches vanilla DetailedMaps art
     vs a ±MAP_RADIUS-only frame (~7% residual zoom).
+
+    Uses mapRadiusConstant (Panel_Map.MAP_RADIUS=300), never FogOfWar.m_MapRadius.
     """
     r = map_radius if map_radius is not None else fog.get("mapRadiusConstant")
     if r is None:
@@ -170,30 +250,102 @@ def resolve_map_extent(
     map_radius: float | None = None,
     pad: float = 0.02,
     use_sample_extent: bool = False,
+    fow_config: Path | None = None,
+    prefer_fow: bool = False,
 ) -> MapExtent:
     """
-    ±(MAP_RADIUS/detailScale) from fog_of_war.json so map_bg UV matches in-game POIs.
+    ±(MAP_RADIUS/detailScale) from fog so map_bg UV matches in-game POIs.
 
-    Raises when fog is missing or unusable — the sample-AABB frame is never a
-    silent fallback, since it ships a misaligned map. Both other framings are
-    opt-in: use_sample_extent (legacy AABB) and map_radius (±R, no detailScale).
+    Default: fog_of_war.json (vanilla). Opt-in prefer_fow: fow.json (Mod).
+    Raises when fog is missing — sample-AABB is never a silent fallback.
+    Opt-in: use_sample_extent (legacy AABB) and map_radius (±R, no detailScale).
     """
     if use_sample_extent:
         if map_xy_samples is None or len(map_xy_samples) < 1:
             raise ValueError("Legacy sample framing needs alignment_samples.json")
         return map_extent_from_samples(map_xy_samples, pad=pad)
 
-    fog = load_fog(dump) if dump is not None else None
+    fog = (
+        load_fog(dump, fow_config=fow_config, prefer_fow=prefer_fow)
+        if dump is not None
+        else None
+    )
     if fog is not None:
         ext = map_extent_from_fog(fog, map_radius=map_radius)
         if ext is not None:
             return ext
     if map_radius is not None and map_radius > 0:
         return map_extent_from_radius(map_radius)
+    if prefer_fow:
+        raise ValueError(
+            "map extent needs fow.json with mapRadiusConstant (and detailScale); "
+            "run make_fow_config.py, or pass --map-radius / --sample-extent."
+        )
     raise ValueError(
         "map extent needs fog_of_war.json with mapRadiusConstant (and detailScale); "
         "re-run dump_map with the charcoal map opened once in region. Override with "
         "--map-radius, or --sample-extent for the legacy (POI-misaligning) frame."
+    )
+
+
+def fow_center_xz(fow: dict) -> tuple[float, float]:
+    """World XZ center matching TldevMaps RegionConfigs.GetCenterOfScene."""
+    bounds = fow.get("unionBounds")
+    if isinstance(bounds, dict):
+        return (
+            0.5 * (float(bounds["minX"]) + float(bounds["maxX"])),
+            0.5 * (float(bounds["minZ"]) + float(bounds["maxZ"])),
+        )
+    return 0.0, 0.0
+
+
+def world_to_map_scale_from_scene_radius(
+    scene_radius: float,
+    map_radius_constant: float = PANEL_MAP_RADIUS,
+) -> float:
+    """
+    Isotropic WorldPositionToMapPosition scale from FogOfWar.m_SceneRadius.
+
+    Vanilla dumps fit scale = MAP_RADIUS * √2 / sceneRadius (sceneRadius is the
+    half-diagonal of the region square; axis half-extent = sceneRadius/√2).
+    """
+    sr = float(scene_radius)
+    if sr <= 0:
+        raise ValueError(f"sceneRadius must be > 0, got {scene_radius}")
+    mrc = float(map_radius_constant)
+    return mrc * math.sqrt(2.0) / sr
+
+
+def synthesize_world_to_map_affine(
+    fow: dict,
+    *,
+    map_radius_constant: float | None = None,
+    flip_axes: bool = False,
+) -> np.ndarray:
+    """
+    Build world XZ → map XY affine matching TldevMaps-registered FOW.
+
+    map = (world - center) * scale, with map_x←world_x, map_y←world_z.
+    flip_axes=True applies a 180° RegionMap angle (MountainPass-style).
+    Default Mod donor (Ash Canyon) uses flip_axes=False.
+    """
+    if fow.get("sceneRadius") is None:
+        raise ValueError("fow.json missing sceneRadius")
+    mrc = (
+        float(map_radius_constant)
+        if map_radius_constant is not None
+        else float(fow.get("mapRadiusConstant") or PANEL_MAP_RADIUS)
+    )
+    scale = world_to_map_scale_from_scene_radius(float(fow["sceneRadius"]), mrc)
+    if flip_axes:
+        scale = -scale
+    cx, cz = fow_center_xz(fow)
+    return np.array(
+        [
+            [scale, 0.0, -scale * cx],
+            [0.0, scale, -scale * cz],
+        ],
+        dtype=np.float64,
     )
 
 
@@ -309,6 +461,7 @@ def load_enrichment(dump: Path) -> tuple[np.ndarray, np.ndarray, dict] | None:
                     "road",
                     "path",
                     "rail",
+                    "walkable",
                 ]
     rock_kind_file = meta.get("rockKindFile")
     if rock_kind_file:
@@ -331,14 +484,15 @@ def load_enrichment(dump: Path) -> tuple[np.ndarray, np.ndarray, dict] | None:
 ENRICH_CLASS_NONE = 0
 ENRICH_CLASS_TERRAIN = 1
 ENRICH_CLASS_ROCK = 2
-ENRICH_CLASS_STRUCTURE = 3  # bridges/docks/buildings/logs; legacy dumps used "bridge" at id 3
+ENRICH_CLASS_STRUCTURE = 3  # buildings/logs/boats; legacy dumps used "bridge" at id 3
 ENRICH_CLASS_BRIDGE = ENRICH_CLASS_STRUCTURE  # alias for older code
 ENRICH_CLASS_ICE_BACKDROP = 4
 ENRICH_CLASS_IGNORE = 5
 ENRICH_CLASS_ROAD = 6
 ENRICH_CLASS_PATH = 7
 ENRICH_CLASS_RAIL = 8
-ENRICH_OVERLAY_CLASSES = (ENRICH_CLASS_ROCK, ENRICH_CLASS_STRUCTURE)
+ENRICH_CLASS_WALKABLE = 9  # bridges/docks/piers/…; map art treats like structure
+ENRICH_OVERLAY_CLASSES = (ENRICH_CLASS_ROCK, ENRICH_CLASS_STRUCTURE, ENRICH_CLASS_WALKABLE)
 ENRICH_TRANSPORT_CLASSES = (ENRICH_CLASS_ROAD, ENRICH_CLASS_PATH, ENRICH_CLASS_RAIL)
 
 # RockKind ids from EnrichmentDump (formatVersion 4+)
@@ -390,7 +544,7 @@ def enrichment_rock_kind_ids(
     return found if found else set(default)
 
 _ROCK_LABELS = frozenset({"rock"})
-_STRUCTURE_LABELS = frozenset({"structure", "bridge"})  # "bridge" = pre-0.9.21 dumps
+_STRUCTURE_LABELS = frozenset({"structure", "bridge", "walkable"})  # "bridge" = pre-0.9.21 dumps
 _TRANSPORT_LABELS = frozenset({"road", "path", "rail"})
 
 
@@ -436,7 +590,7 @@ def enrichment_structure_ids(class_labels: list[str] | None = None) -> set[int]:
     return enrichment_class_ids(
         class_labels,
         _STRUCTURE_LABELS,
-        default=(ENRICH_CLASS_STRUCTURE,),
+        default=(ENRICH_CLASS_STRUCTURE, ENRICH_CLASS_WALKABLE),
     )
 
 def load_exclusion_mask(mask_png: Path, sidecar: Path) -> tuple[np.ndarray, dict]:

@@ -2,20 +2,25 @@
 """Build a map_bg PNG from a TerrainDumper dump (Phase 4).
 
 Default style is raw at ship 4096 (charcoal-oriented ship post):
-  hillshade → edge fade + feather (outside terrain / mask cuts)
-  → void black fade 300 m (clean of grain) → desaturate → levels → color balance
+  hillshade → desaturate → levels → color balance
+  → edge fade + feather (outside terrain / mask cuts)
+  → void alpha fade 300 m (clean of grain)
   → black 100 m grid @ 1.5 → stipple → vignette 0.2 → paper grain σ=36
 
-Use --pipeline color for the vintage color ship look (partial chroma, soft levels,
-cool dim-gray edge tint). Charcoal SHIP_* presets stay the default.
+Use --pipeline color for the vintage color ship look (partial chroma).
+Charcoal (default) is full desat. Both pipelines share the same levels
+preset and cool dim-gray void edge tint.
 
-Edge fade runs *before* the post chain so vignette does not crush the border
-ramp and the world grid stays visible outside the terrain. Deep void black is
-re-applied after grain so noise does not persist at the frame. A hand-painted
-exclusion mask at masks/<Scene>/mask.png is required (see make_mask_template.py).
+Color treatment (desat / levels / color balance) runs *before* edge fade so
+mask-feather blends already-treated terrain into the void (no hard seam at the
+feather edge). Grid / vignette / grain stay *after* fade so the border ramp is
+not crushed and the world grid stays visible outside the terrain. Deep void
+alpha is re-applied after grain so noise does not persist at the frame. A
+hand-painted exclusion mask at masks/<Scene>/mask.png is required (see
+make_mask_template.py).
 
 Use --style charcoal for the old paper/ink look. Use --no-ship-post to skip
-the raw post-process chain.
+the raw post-process chain. Use --no-void-alpha-fade for the old RGB→black void.
 
 Border policy (all regions): terrain DEM `valid` defines the map edge.
 Optional inset via --inset-frac / --inset-m (default off). Enrichment max-merges
@@ -49,6 +54,7 @@ from mapalign import (  # noqa: E402
     _is_backdrop_tile,
     apply_affine,
     collect_samples,
+    find_fow_config_path,
     fit_affine,
     invert_affine,
     list_terrain_stems,
@@ -64,15 +70,21 @@ from mapalign import (  # noqa: E402
     enrichment_rock_ids,
     enrichment_structure_ids,
     enrichment_transport_ids,
+    synthesize_world_to_map_affine,
     warp_dem_to_image,
     warp_label_to_image,
     warp_ortho_to_image,
 )
 
-# Ship post-process defaults (GIMP presets tuned on LakeRegion 4k) — charcoal / legacy
-SHIP_OUTSIDE_RGB = (58, 55, 52)
-SHIP_MASK_FAR_RGB = (100, 96, 90)
-SHIP_LEVELS = dict(in_low=0.0, gamma=0.52, in_high=117.0, out_low=0.0, out_high=225.0)
+# Shared levels (GIMP "map" preset tuned on LakeRegion 4k; both pipelines).
+MAP_LEVELS = dict(in_low=0.0, gamma=0.72, in_high=150.0, out_low=0.0, out_high=180.0)
+
+# Shared void edge tint (both pipelines). From TRN_Snow_Ground_B_Noise mean ×0.25/×0.35.
+SHIP_OUTSIDE_RGB = (48, 51, 51)
+SHIP_MASK_FAR_RGB = (67, 71, 72)
+
+# Ship post-process defaults — charcoal / legacy
+SHIP_LEVELS = MAP_LEVELS
 SHIP_COLOR_BALANCE = dict(cyan_red=5.0, magenta_green=0.0, yellow_blue=-4.0)
 SHIP_GRID_M = 100.0
 SHIP_GRID_WIDTH = 1.5
@@ -83,12 +95,12 @@ SHIP_STIPPLE_STRENGTH = 55.0
 SHIP_STIPPLE_SEED = 99
 SHIP_VIGNETTE_STRENGTH = 0.2
 
-# Color / vintage pipeline (--pipeline color). Edge from TRN_Snow_Ground_B_Noise mean ×0.25/×0.35.
-COLOR_OUTSIDE_RGB = (48, 51, 51)
-COLOR_MASK_FAR_RGB = (67, 71, 72)
-COLOR_LEVELS = dict(in_low=0.0, gamma=0.72, in_high=150.0, out_low=0.0, out_high=235.0)
+# Color / vintage pipeline (--pipeline color) — same void as charcoal.
+COLOR_OUTSIDE_RGB = SHIP_OUTSIDE_RGB
+COLOR_MASK_FAR_RGB = SHIP_MASK_FAR_RGB
+COLOR_LEVELS = MAP_LEVELS
 COLOR_COLOR_BALANCE = dict(cyan_red=5.0, magenta_green=0.0, yellow_blue=-4.0)
-COLOR_CHROMA_KEEP = 0.70  # 1=full color, 0=grayscale; charcoal path uses full desat instead
+COLOR_CHROMA_KEEP = 0.80  # 1=full color, 0=grayscale; charcoal path uses full desat instead
 # Enrichment protrusion threshold (meters over a terrain DEM). Capture cell size is separate (0.25 m).
 ENRICH_PROTRUDE_M = 0.5
 # MiningRegion Concentrator: roof often lacks colliders so enrichment top-hit is rock under
@@ -897,8 +909,13 @@ def apply_color_balance(
     magenta_green: float = 0.0,
     yellow_blue: float = -4.0,
     preserve_luminosity: bool = True,
+    mask: np.ndarray | None = None,
 ) -> Image.Image:
-    """GIMP Color Balance; same CR/MG/YB applied to shadows, midtones, highlights."""
+    """GIMP Color Balance; same CR/MG/YB applied to shadows, midtones, highlights.
+
+    If mask is set (True = apply), pixels outside the mask keep their original RGB
+    so the cool gray void edge tint is not warmed by the midtone shift.
+    """
     rgba = img.mode == "RGBA"
     arr = np.asarray(img.convert("RGBA" if rgba else "RGB"), dtype=np.float64)
     rgb = arr[..., :3] / 255.0
@@ -917,6 +934,11 @@ def apply_color_balance(
         g2 = np.clip(g2 * scale, 0, 1)
         b2 = np.clip(b2 * scale, 0, 1)
     out_rgb = np.stack([r2, g2, b2], axis=-1) * 255.0
+    if mask is not None:
+        m = np.asarray(mask, dtype=bool)
+        if m.shape != arr.shape[:2]:
+            raise ValueError(f"color-balance mask shape {m.shape} != image {arr.shape[:2]}")
+        out_rgb = np.where(m[..., None], out_rgb, arr[..., :3])
     if rgba:
         out = np.concatenate([out_rgb, arr[..., 3:4]], axis=2)
         return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGBA")
@@ -1116,32 +1138,24 @@ def apply_vignette(
     return Image.fromarray(arr[..., :3].astype(np.uint8), "RGB")
 
 
-def postprocess_ship_look(
+def postprocess_ship_color(
     img: Image.Image,
     valid: np.ndarray,
-    A_world_to_map: np.ndarray,
-    map_extent: MapExtent,
     *,
     desaturate: bool = True,
     levels: bool = True,
     color_balance: bool = True,
-    grid_m: float = SHIP_GRID_M,
-    grid_width: float = SHIP_GRID_WIDTH,
-    stipple: bool = True,
-    vignette: bool = True,
-    grain_sigma: float = SHIP_GRAIN_SIGMA,
-    grain_seed: int = SHIP_GRAIN_SEED,
-    stipple_density: float = SHIP_STIPPLE_DENSITY,
-    stipple_strength: float = SHIP_STIPPLE_STRENGTH,
-    vignette_strength: float = SHIP_VIGNETTE_STRENGTH,
     levels_params: dict | None = None,
     color_balance_params: dict | None = None,
     chroma_keep: float | None = None,
+    color_balance_mask: np.ndarray | None = None,
 ) -> Image.Image:
-    """Ship raw look: … → grid → stipple → vignette → paper grain.
+    """Ship color treatment (runs *before* edge fade).
 
     desaturate + chroma_keep=None → full grayscale (charcoal).
     desaturate + chroma_keep in [0,1] → keep that fraction of chroma (color vintage).
+    color_balance_mask: terrain footprint for color balance (default: valid). Void
+    pixels are left alone; fade later paints the cool gray ramp over treated terrain.
     """
     out = img.convert("RGBA")
     if desaturate:
@@ -1163,7 +1177,30 @@ def postprocess_ship_look(
         out = apply_levels_value(out, **lp)
     if color_balance:
         cp = {**SHIP_COLOR_BALANCE, **(color_balance_params or {})}
-        out = apply_color_balance(out, **cp)
+        # Terrain only — do not use grid_valid (scope "all" would tint the void).
+        bal_mask = color_balance_mask if color_balance_mask is not None else valid
+        out = apply_color_balance(out, mask=bal_mask, **cp)
+    return out
+
+
+def postprocess_ship_overlays(
+    img: Image.Image,
+    valid: np.ndarray,
+    A_world_to_map: np.ndarray,
+    map_extent: MapExtent,
+    *,
+    grid_m: float = SHIP_GRID_M,
+    grid_width: float = SHIP_GRID_WIDTH,
+    stipple: bool = True,
+    vignette: bool = True,
+    grain_sigma: float = SHIP_GRAIN_SIGMA,
+    grain_seed: int = SHIP_GRAIN_SEED,
+    stipple_density: float = SHIP_STIPPLE_DENSITY,
+    stipple_strength: float = SHIP_STIPPLE_STRENGTH,
+    vignette_strength: float = SHIP_VIGNETTE_STRENGTH,
+) -> Image.Image:
+    """Ship overlays (runs *after* edge fade): grid → stipple → vignette → grain."""
+    out = img.convert("RGBA")
     if grid_m > 0:
         cov = world_meter_grid_coverage(
             valid, A_world_to_map, map_extent, grid_m, width_px=grid_width
@@ -1180,6 +1217,58 @@ def postprocess_ship_look(
     if grain_sigma > 0:
         out = apply_paper_grain(out, sigma=grain_sigma, seed=grain_seed)
     return out
+
+
+def postprocess_ship_look(
+    img: Image.Image,
+    valid: np.ndarray,
+    A_world_to_map: np.ndarray,
+    map_extent: MapExtent,
+    *,
+    desaturate: bool = True,
+    levels: bool = True,
+    color_balance: bool = True,
+    grid_m: float = SHIP_GRID_M,
+    grid_width: float = SHIP_GRID_WIDTH,
+    stipple: bool = True,
+    vignette: bool = True,
+    grain_sigma: float = SHIP_GRAIN_SIGMA,
+    grain_seed: int = SHIP_GRAIN_SEED,
+    stipple_density: float = SHIP_STIPPLE_DENSITY,
+    stipple_strength: float = SHIP_STIPPLE_STRENGTH,
+    vignette_strength: float = SHIP_VIGNETTE_STRENGTH,
+    levels_params: dict | None = None,
+    color_balance_params: dict | None = None,
+    chroma_keep: float | None = None,
+    color_balance_mask: np.ndarray | None = None,
+) -> Image.Image:
+    """Full ship post in one shot (color then overlays; prefer split around fade)."""
+    out = postprocess_ship_color(
+        img,
+        valid,
+        desaturate=desaturate,
+        levels=levels,
+        color_balance=color_balance,
+        levels_params=levels_params,
+        color_balance_params=color_balance_params,
+        chroma_keep=chroma_keep,
+        color_balance_mask=color_balance_mask,
+    )
+    return postprocess_ship_overlays(
+        out,
+        valid,
+        A_world_to_map,
+        map_extent,
+        grid_m=grid_m,
+        grid_width=grid_width,
+        stipple=stipple,
+        vignette=vignette,
+        grain_sigma=grain_sigma,
+        grain_seed=grain_seed,
+        stipple_density=stipple_density,
+        stipple_strength=stipple_strength,
+        vignette_strength=vignette_strength,
+    )
 
 
 def resolve_ortho_paths(
@@ -1303,7 +1392,7 @@ def void_black_weight(
     black_m: float,
     dist_blur_m: float = DEFAULT_EDGE_FADE_DIST_BLUR_M,
 ) -> np.ndarray:
-    """0..1 blend toward pure black in the void (0 on/near terrain, 1 in deep void)."""
+    """0..1 blend toward pure black (or alpha) in the void (0 on/near terrain, 1 in deep void)."""
     outside = ~valid
     black_span = float(max(black_m, 0.0))
     if not outside.any() or fade_m <= 0 or black_span <= 0:
@@ -1334,6 +1423,54 @@ def apply_clean_void_black(
     return Image.fromarray(np.clip(arr[..., :3], 0, 255).astype(np.uint8), "RGB")
 
 
+def apply_clean_void_alpha(
+    img: Image.Image,
+    weight: np.ndarray,
+) -> Image.Image:
+    """Fade alpha by void weight — deep void goes transparent (strips opaque grain/stipple)."""
+    if weight.shape != img.size[::-1] or float(np.max(weight)) <= 0:
+        return img
+    arr = np.asarray(img.convert("RGBA"), dtype=np.float64)
+    arr[..., 3] = arr[..., 3] * (1.0 - weight)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGBA")
+
+
+def inset_feather_weight(
+    feather_zone: np.ndarray,
+    *,
+    dz: float,
+    dx: float,
+    inset_m: float,
+    offset_m: float,
+    strength: float,
+) -> np.ndarray:
+    """Soft-band weight 0..1 across a painted mask edge (inset mode).
+
+    Signed distance: + into the cut, - onto the map. Smoothstep from
+    -offset_m (full map) to +inset_m (outside fill), scaled by strength.
+    """
+    from scipy import ndimage
+
+    if feather_zone is None:
+        raise ValueError("feather_zone is required")
+    zone = np.asarray(feather_zone, dtype=bool)
+    if not zone.any():
+        return np.zeros(zone.shape, dtype=np.float64)
+    strength = float(np.clip(strength, 0, 1))
+    inset_m = float(inset_m)
+    offset_m = float(max(offset_m, 0.0))
+    if strength <= 0 or (inset_m <= 0 and offset_m <= 0):
+        return np.zeros(zone.shape, dtype=np.float64)
+    dist_in = ndimage.distance_transform_edt(zone, sampling=(dz, dx))
+    dist_out = ndimage.distance_transform_edt(~zone, sampling=(dz, dx))
+    signed = dist_in - dist_out
+    span = inset_m + offset_m
+    if span <= 0:
+        return np.zeros(zone.shape, dtype=np.float64)
+    a = _smoothstep01((signed + offset_m) / span) * strength
+    return np.where((signed >= -offset_m) & (signed <= inset_m), a, 0.0).astype(np.float64)
+
+
 def shade_outside(
     img: Image.Image,
     valid: np.ndarray,
@@ -1349,6 +1486,7 @@ def shade_outside(
     feather_offset_m: float = 0.0,
     black_m: float = 0.0,
     black_rgb: tuple[int, int, int] = (0, 0, 0),
+    alpha_fade: bool = False,
     dist_blur_m: float = DEFAULT_EDGE_FADE_DIST_BLUR_M,
     outside_rgb: tuple[int, int, int] = SHIP_OUTSIDE_RGB,
     mask_far_rgb: tuple[int, int, int] = SHIP_MASK_FAR_RGB,
@@ -1356,7 +1494,8 @@ def shade_outside(
     """Ramp everything outside the drawn terrain — region border and hand-masked cuts alike.
 
     Two-stop (black_m=0): outside fill at the terrain edge → lighter paper away from it.
-    Three-stop (black_m>0): outside fill → paper lift over fade_m → black over black_m.
+    Three-stop (black_m>0): outside fill → paper lift over fade_m → black over black_m
+    (or alpha→0 over black_m when alpha_fade=True; RGB stays on the paper ramp).
     Playable DEM (valid) is never recolored by the distance ramp.
 
     dist_blur_m: Gaussian blur (metres) on signed outside distance — softens
@@ -1392,26 +1531,24 @@ def shade_outside(
         paper = edge + (far - edge) * lift_c
         t_paper = _smoothstep01(dist_m / float(fade_m))
         ramp = edge[None, None, :] + (paper - edge)[None, None, :] * t_paper[..., None]
-        if black_span > 0:
+        if black_span > 0 and not alpha_fade:
             t_black = _smoothstep01((dist_m - float(fade_m)) / black_span)
             ramp = ramp + (black - paper)[None, None, :] * t_black[..., None]
         arr[..., :3] = np.where(outside[..., None], ramp, arr[..., :3])
 
     if strength > 0 and (inset_m > 0 or offset_m > 0):
         if feather_mode == "inset" and feather_zone is not None and feather_zone.any():
-            # Signed distance to the painted edge: + into the cut, - onto the map.
-            # One smoothstep from -offset_m (full map) to +inset_m (outside fill).
-            # Keep sharp — blurring this washes outside tint onto the map.
-            dist_in = ndimage.distance_transform_edt(feather_zone, sampling=(dz, dx))
-            dist_out = ndimage.distance_transform_edt(~feather_zone, sampling=(dz, dx))
-            signed = dist_in - dist_out
-            span = inset_m + offset_m
-            if span > 0:
-                # Soft band only — deep void keeps the paper/black fade above.
-                a = _smoothstep01((signed + offset_m) / span) * strength
-                a = np.where((signed >= -offset_m) & (signed <= inset_m), a, 0.0)
-                a = a[..., None]
-                arr[..., :3] = arr[..., :3] * (1.0 - a) + edge[None, None, :] * a
+            # Soft band only — deep void keeps the paper/black fade above.
+            a = inset_feather_weight(
+                feather_zone,
+                dz=dz,
+                dx=dx,
+                inset_m=inset_m,
+                offset_m=offset_m,
+                strength=strength,
+            )
+            a = a[..., None]
+            arr[..., :3] = arr[..., :3] * (1.0 - a) + edge[None, None, :] * a
         elif feather_mode != "inset" and inset_m > 0:
             inward_m = ndimage.distance_transform_edt(valid, sampling=(dz, dx))
             a = (1.0 - _smoothstep01(inward_m / inset_m)) * strength
@@ -1584,8 +1721,18 @@ def main() -> int:
         default="charcoal",
         choices=["charcoal", "color"],
         help=(
-            "Presentation preset: charcoal = full desat + brown edge (default ship); "
-            "color = vintage partial chroma + cool dim-gray edge. Shared pre-post either way."
+            "Presentation preset: charcoal = full desat (default ship); "
+            "color = vintage partial chroma. Shared void edge tint and pre-post either way."
+        ),
+    )
+    ap.add_argument(
+        "--chroma-keep",
+        type=float,
+        default=None,
+        help=(
+            "Ship-post chroma fraction 0..1 after desaturate mix "
+            f"(default: {COLOR_CHROMA_KEEP} for --pipeline color; full desat for charcoal). "
+            "Overrides the pipeline default when set."
         ),
     )
     ap.add_argument(
@@ -1637,6 +1784,22 @@ def main() -> int:
         help="Override Panel_Map.MAP_RADIUS for image UV (±R). Default: fog_of_war.json mapRadiusConstant",
     )
     ap.add_argument(
+        "--from-fow",
+        action="store_true",
+        help="Mod path: world→map + UV from fow.json (opt-in; default remains alignment + fog_of_war)",
+    )
+    ap.add_argument(
+        "--fow-config",
+        type=Path,
+        default=None,
+        help="With --from-fow: path to fow.json (default: <dump>/fow.json or masks/<Scene>/fow.json)",
+    )
+    ap.add_argument(
+        "--flip-map-axes",
+        action="store_true",
+        help="With --from-fow: negate both axes (MountainPass-style 180° RegionMap)",
+    )
+    ap.add_argument(
         "--sample-extent",
         action="store_true",
         help="Legacy UV: frame to alignment-sample AABB+pad (misaligns in-game POIs)",
@@ -1668,7 +1831,20 @@ def main() -> int:
         "--edge-fade-black-m",
         type=float,
         default=300.0,
-        help="After the paper lift, ramp void to clean black over N meters (0=off); default 300",
+        help=(
+            "After the paper lift, ramp void to alpha 0 (default) or clean black "
+            "(--no-void-alpha-fade) over N meters (0=off); default 300"
+        ),
+    )
+    ap.add_argument(
+        "--void-alpha-fade",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Fade alpha→0 over --edge-fade-black-m instead of RGB→black "
+            "(default on for charcoal and color; paper lift + inset feather unchanged). "
+            "Use --no-void-alpha-fade for the old black void"
+        ),
     )
     ap.add_argument(
         "--edge-fade-dist-blur-m",
@@ -1744,39 +1920,68 @@ def main() -> int:
         post_levels = SHIP_LEVELS
         post_balance = SHIP_COLOR_BALANCE
         chroma_keep = None
+    if args.chroma_keep is not None:
+        chroma_keep = float(np.clip(args.chroma_keep, 0.0, 1.0))
     print(
         f"pipeline={pipeline} outside={outside_rgb} far={mask_far_rgb}"
         + (f" chroma_keep={chroma_keep}" if chroma_keep is not None else " desat=full")
     )
 
     dump: Path = args.dump_dir
-    if not (dump / "alignment_samples.json").exists():
-        print(f"Missing alignment_samples.json in {dump} — open map once and re-dump.")
+    synth = bool(args.from_fow)
+    fow_path = find_fow_config_path(dump, args.fow_config) if synth else None
+    if synth and fow_path is None:
+        print(
+            "--from-fow needs fow.json (run: python tools/make_fow_config.py <dump>). "
+            "Omit --from-fow to use the vanilla alignment_samples + fog_of_war path."
+        )
         return 1
+
     tile = args.tile or main_tile_stem(dump)
     if not (dump / f"{tile}_meta.json").exists():
         print(f"Missing {tile}_meta.json")
         return 1
 
-    samples = load_json(dump / "alignment_samples.json")
-    W, M = collect_samples(samples, prefer_tile=tile)
-    if len(W) < 3:
-        print("Need >=3 alignment samples")
-        return 1
-    A = fit_affine(W, M)
-    err = np.linalg.norm(apply_affine(A, W) - M, axis=1)
-    print(f"affine RMSE (map units): {err.mean():.4f}")
+    M: np.ndarray | None = None
+    if synth:
+        assert fow_path is not None
+        fow = load_json(fow_path)
+        A = synthesize_world_to_map_affine(
+            fow,
+            map_radius_constant=args.map_radius,
+            flip_axes=bool(args.flip_map_axes),
+        )
+        print(
+            f"affine from fow.json ({fow_path.name}): "
+            f"scale={A[0, 0]:.6f} center=({-A[0, 2] / A[0, 0]:.1f}, {-A[1, 2] / A[1, 1]:.1f})"
+            + (" flip_axes" if args.flip_map_axes else "")
+        )
+    else:
+        if not (dump / "alignment_samples.json").exists():
+            print(f"Missing alignment_samples.json in {dump} — open map once and re-dump.")
+            return 1
+        samples = load_json(dump / "alignment_samples.json")
+        W, M = collect_samples(samples, prefer_tile=tile)
+        if len(W) < 3:
+            print("Need >=3 alignment samples")
+            return 1
+        A = fit_affine(W, M)
+        err = np.linalg.norm(apply_affine(A, W) - M, axis=1)
+        print(f"affine RMSE (map units): {err.mean():.4f}")
 
     extent = resolve_map_extent(
         dump,
         M,
         map_radius=args.map_radius,
         use_sample_extent=args.sample_extent,
+        fow_config=args.fow_config if synth else None,
+        prefer_fow=synth,
     )
     print(
         f"map UV extent: [{extent[0]:.1f},{extent[1]:.1f}]..[{extent[2]:.1f},{extent[3]:.1f}] "
         f"span={extent[2]-extent[0]:.1f}"
         + (" (sample AABB)" if args.sample_extent else " (MAP_RADIUS/detailScale)")
+        + (" [fow.json]" if synth else "")
     )
 
     meters, meta = load_tile_heights(dump, tile)
@@ -2115,25 +2320,17 @@ def main() -> int:
     else:
         grid_valid = display_valid
     print(f"grid scope: {args.grid_scope}")
+    # Contours from the edge-distance-merged DEM only. Per-tile OR ghosted lines
+    # wherever overlapping tiles disagreed slightly (e.g. MountainTownRegion).
+    # Prefer pre-enrichment heights so rock/structure bumps don't mint extra ink;
+    # enrich_cover still clears protrusions at render time.
     contour_gentle_mask: np.ndarray | None = None
     contour_steep_mask: np.ndarray | None = None
     if args.style == "raw" and args.contour_m > 0:
-        contour_gentle_mask = np.zeros_like(valid, dtype=bool)
-        contour_steep_mask = np.zeros_like(valid, dtype=bool)
-        for stem in list_terrain_stems(dump):
-            tmeta = load_json(dump / f"{stem}_meta.json")
-            if _is_backdrop_tile(tmeta) or float(tmeta.get("heightNormalizedMax", 0.0)) == 0.0:
-                continue
-            try:
-                tmeters, _ = load_tile_heights(dump, stem)
-                tdem, tvalid = warp_dem_to_image(tmeters, tmeta, A, extent, width, height)
-            except Exception as ex:
-                print(f"skip contour tile {stem}: {ex}")
-                continue
-            tvalid = tvalid & valid
-            gentle_mask, steep_mask = contour_masks(tdem, tvalid, float(args.contour_m))
-            contour_gentle_mask |= gentle_mask
-            contour_steep_mask |= steep_mask
+        contour_dem = dem_pre_enrich if dem_pre_enrich is not None else dem
+        contour_gentle_mask, contour_steep_mask = contour_masks(
+            contour_dem, valid, float(args.contour_m)
+        )
 
     owarp: np.ndarray | None = None
     ovalid: np.ndarray | None = None
@@ -2277,45 +2474,43 @@ def main() -> int:
                 feather_zone=feather_zone,
                 feather_offset_m=args.edge_feather_offset_m,
                 black_m=black_m,
+                alpha_fade=bool(args.void_alpha_fade),
                 dist_blur_m=float(args.edge_fade_dist_blur_m),
                 outside_rgb=outside_rgb,
                 mask_far_rgb=mask_far_rgb,
             )
 
-        primary_black_m = float(args.edge_fade_black_m)
-        img = apply_edge_fade(pre_shade, primary_black_m)
-        print(
-            f"edge fade: {args.edge_fade_m:g} m lift={args.edge_fade_lift:g} "
-            f"black={primary_black_m:g} m dist_blur={float(args.edge_fade_dist_blur_m):g} m "
-            f"feather inset={args.edge_feather_m:g} m offset={args.edge_feather_offset_m:g} m "
-            f"@{args.edge_feather_strength:g} mode={args.edge_feather_mode}"
-        )
-        void_texture_variants: list[tuple[str, Image.Image]] | None = None
-        edge_black_variants: list[tuple[str, Image.Image]] = []
+        def run_ship_color(src: Image.Image) -> Image.Image:
+            # Treat full terrain (incl. soft feather band) before fade blends to void.
+            return postprocess_ship_color(
+                src,
+                display_valid,
+                desaturate=not args.no_desaturate,
+                levels=not args.no_levels,
+                color_balance=not args.no_color_balance,
+                levels_params=post_levels,
+                color_balance_params=post_balance,
+                chroma_keep=chroma_keep,
+                color_balance_mask=display_valid,
+            )
 
-        def run_ship_post(src: Image.Image, black_m: float) -> Image.Image:
+        def run_ship_overlays(src: Image.Image, black_m: float) -> Image.Image:
             grid_m = 0.0 if args.no_grid else float(args.grid_m)
             grain_sigma = 0.0 if args.no_grain else float(args.grain_sigma)
             vig = 0.0 if args.no_vignette else float(args.vignette)
-            out = postprocess_ship_look(
+            out = postprocess_ship_overlays(
                 src,
                 grid_valid,
                 A,
                 extent,
-                desaturate=not args.no_desaturate,
-                levels=not args.no_levels,
-                color_balance=not args.no_color_balance,
                 grid_m=grid_m,
                 grid_width=float(args.grid_width),
                 stipple=not args.no_stipple,
                 vignette=vig > 0,
                 vignette_strength=vig,
                 grain_sigma=grain_sigma,
-                levels_params=post_levels,
-                color_balance_params=post_balance,
-                chroma_keep=chroma_keep,
             )
-            # Re-assert pure black in the deep void so grain/stipple/grid do not persist.
+            # Re-assert deep void so grain/stipple/grid do not persist (black or alpha).
             if black_m > 0:
                 w = void_black_weight(
                     valid,
@@ -2325,20 +2520,48 @@ def main() -> int:
                     black_m=black_m,
                     dist_blur_m=float(args.edge_fade_dist_blur_m),
                 )
-                out = apply_clean_void_black(out, w)
+                if args.void_alpha_fade:
+                    out = apply_clean_void_alpha(out, w)
+                else:
+                    out = apply_clean_void_black(out, w)
             return out
 
+        primary_black_m = float(args.edge_fade_black_m)
+        void_texture_variants: list[tuple[str, Image.Image]] | None = None
+        edge_black_variants: list[tuple[str, Image.Image]] = []
+
         if not args.no_ship_post:
-            img = run_ship_post(img, primary_black_m)
+            treated = run_ship_color(pre_shade)
+            img = apply_edge_fade(treated, primary_black_m)
+            void_tail = (
+                f"alpha={primary_black_m:g} m"
+                if args.void_alpha_fade
+                else f"black={primary_black_m:g} m"
+            )
+            print(
+                f"edge fade: {args.edge_fade_m:g} m lift={args.edge_fade_lift:g} "
+                f"{void_tail} dist_blur={float(args.edge_fade_dist_blur_m):g} m "
+                f"feather inset={args.edge_feather_m:g} m offset={args.edge_feather_offset_m:g} m "
+                f"@{args.edge_feather_strength:g} mode={args.edge_feather_mode}"
+            )
+            img = run_ship_overlays(img, primary_black_m)
+            clean_void = ""
+            if primary_black_m > 0:
+                clean_void = (
+                    f" clean_void_alpha={primary_black_m:g}m"
+                    if args.void_alpha_fade
+                    else f" clean_void_black={primary_black_m:g}m"
+                )
             print(
                 f"ship-post: desat={not args.no_desaturate} levels={not args.no_levels} "
                 f"color_balance={not args.no_color_balance} "
                 f"chroma_keep={chroma_keep if chroma_keep is not None else 'full'} "
+                f"(color before fade) "
                 f"grid_m={0.0 if args.no_grid else float(args.grid_m)} "
                 f"grid_width={args.grid_width} stipple={not args.no_stipple} "
                 f"vignette={0.0 if args.no_vignette else float(args.vignette)} "
                 f"grain_sigma={0.0 if args.no_grain else float(args.grain_sigma)}"
-                + (f" clean_void_black={primary_black_m:g}m" if primary_black_m > 0 else "")
+                + clean_void
             )
             if args.void_texture_tests:
                 outside = ~valid
@@ -2360,10 +2583,22 @@ def main() -> int:
             for bm in black_preview_ms:
                 if abs(bm - primary_black_m) < 1e-6:
                     continue
-                faded = apply_edge_fade(pre_shade, bm)
-                edge_black_variants.append((f"black{bm:g}m", run_ship_post(faded, bm)))
+                faded = apply_edge_fade(treated, bm)
+                edge_black_variants.append((f"black{bm:g}m", run_ship_overlays(faded, bm)))
                 print(f"edge-fade-black preview: {bm:g} m (clean void)")
         else:
+            img = apply_edge_fade(pre_shade, primary_black_m)
+            void_tail = (
+                f"alpha={primary_black_m:g} m"
+                if args.void_alpha_fade
+                else f"black={primary_black_m:g} m"
+            )
+            print(
+                f"edge fade: {args.edge_fade_m:g} m lift={args.edge_fade_lift:g} "
+                f"{void_tail} dist_blur={float(args.edge_fade_dist_blur_m):g} m "
+                f"feather inset={args.edge_feather_m:g} m offset={args.edge_feather_offset_m:g} m "
+                f"@{args.edge_feather_strength:g} mode={args.edge_feather_mode}"
+            )
             print("ship-post: off")
             if args.void_texture_tests:
                 print("void-texture-tests skipped (--no-ship-post)")

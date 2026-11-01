@@ -29,8 +29,24 @@ venv/
 ## Logs / local noise
 debug.log
 
+## Historical roadmap (not ship docs)
+GOALS.md
+
 ## Cursor (plans, local agent state)
 .cursor/
+
+## Local scratch tools (keep on disk, do not ship)
+tools/stamp_map_objects.py
+tools/composite_prison_yard.py
+tools/composite_prison_zone.py
+
+## Mod region masks (WIP — ignore until ready to ship)
+masks/Mod*/
+
+## Regenerable mask paint guides (make_mask_templates.ps1 / stamp_template_*.py)
+masks/**/template.png
+masks/**/template_portals.png
+masks/**/template_pois.png
 
 ## Editor working files
 *.xcf

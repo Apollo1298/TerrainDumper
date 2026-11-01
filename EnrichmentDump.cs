@@ -35,8 +35,8 @@ internal static class EnrichmentDump
     private const float DefaultNamesProbeCellSize = 2f;
     private const float DefaultLeakMinAboveMeters = 5f;
     /// <summary>
-    /// Morph-close structure class holes this many metres so building footprints
-    /// (missing roof colliders) still classify as structure for contour suppress.
+    /// Morph-close structure/walkable class holes this many metres so footprints
+    /// (missing roof colliders) still classify for contour suppress.
     /// </summary>
     private const float StructureCloseMeters = 2.5f;
 
@@ -47,7 +47,7 @@ internal static class EnrichmentDump
         None = 0,
         Terrain = 1,
         Rock = 2,
-        /// <summary>Bridges, docks, buildings, log piles — thin rim in map build.</summary>
+        /// <summary>Buildings, vehicles, piles, boats — thin rim in map build.</summary>
         Structure = 3,
         IceBackdrop = 4,
         Ignore = 5,
@@ -55,8 +55,13 @@ internal static class EnrichmentDump
         Road = 6,
         /// <summary>Trails / footpaths — contour suppress only.</summary>
         Path = 7,
-        /// <summary>Rail beds — contour suppress only (trains/bridges stay structure).</summary>
+        /// <summary>Rail beds — contour suppress only (trains stay structure).</summary>
         Rail = 8,
+        /// <summary>
+        /// Walk-on structures (bridges/docks/piers/…). Map art treats like structure;
+        /// exported for other consumers that need a transport-deck subset.
+        /// </summary>
+        Walkable = 9,
     }
 
     /// <summary>
@@ -93,6 +98,7 @@ internal static class EnrichmentDump
         "road",
         "path",
         "rail",
+        "walkable",
     };
 
     private static readonly string[] RockKindLabelNames =
@@ -158,7 +164,9 @@ internal static class EnrichmentDump
         "Prologue Collision / Collsion / WindSpeedTriggers";
 
     private const string ClassRuleDescription =
-        "TerrainCollider→terrain; man-made name/path (Bridge/Hangar/Cabin/Dam/Quonset/…/STR_/BLD_)→structure; " +
+        "TerrainCollider→terrain; " +
+        "Bridge/Dock/Pier/Wharf/Jetty/Boardwalk/Walkway/Stairs/Ladder/Platform/Ramp/Deck/Slipway→walkable; " +
+        "man-made name/path (Hangar/Cabin/Dam/Quonset/Boat/Boathouse/…/STR_/BLD_)→structure; " +
         "Ice/Water/Pond/Creek/Shelf/Backdrop→ice_backdrop; " +
         "Road*→road; Trail/Path→path; Rail/Railroad/Railway→rail; " +
         "Rock/Boulder/Cliff→rock (Rock not matched inside Blackrock); " +
@@ -167,9 +175,18 @@ internal static class EnrichmentDump
 
     public static bool IsRunning => _running;
 
+    /// <summary>Stop an in-progress enrichment dump (used by dump_enrichment_all_abort).</summary>
+    public static void AbortRunning()
+    {
+        if (!_running)
+            return;
+        Msg("Enrichment dump aborted.");
+        Abort();
+    }
+
     /// <summary>
-    /// Start enrichment. Call from console handler (after parsing args) or F10 with default cell.
-    /// Do not call uConsole.GetFloat here — hotkey path must not touch console args.
+    /// Start enrichment. Call from console handler (after parsing args) with default cell when unbound.
+    /// Do not call uConsole.GetFloat here unless parsing console args.
     /// </summary>
     public static void Run(float cellSize = DefaultCellSize, int rowsPerFrame = DefaultRowsPerFrame)
     {
@@ -853,6 +870,9 @@ internal static class EnrichmentDump
             }
 
             _row = end;
+            DumpBackground.Pulse();
+
+            // Sparse on purpose: MelonLogger every few rows tanks throughput (why rowsPerFrame is 128).
             if (_row % 50 == 0 || _row >= _height)
             {
                 float pct = 100f * _row / Math.Max(1, _height);
@@ -870,8 +890,11 @@ internal static class EnrichmentDump
         }
     }
 
+    private static bool IsStructureLike(HitClass c) =>
+        c == HitClass.Structure || c == HitClass.Walkable;
+
     private static bool IsOverlayHitClass(HitClass c) =>
-        c == HitClass.Structure
+        IsStructureLike(c)
         || c == HitClass.Rock
         || c == HitClass.IceBackdrop
         || c == HitClass.Road
@@ -911,11 +934,11 @@ internal static class EnrichmentDump
             HitClass hc = ClassifyHitCached(col);
             if (!IsOverlayHitClass(hc))
                 continue;
-            // Prefer nearer overlay; structure beats rock/ice at equal-ish distance.
+            // Prefer nearer overlay; structure/walkable beats rock/ice at equal-ish distance.
             bool better = bestCol == null || hit.distance < bestDist - 1e-3f
                 || (Mathf.Abs(hit.distance - bestDist) <= 1e-3f
-                    && hc == HitClass.Structure
-                    && ClassifyHitCached(bestCol) != HitClass.Structure);
+                    && IsStructureLike(hc)
+                    && !IsStructureLike(ClassifyHitCached(bestCol)));
             if (!better)
                 continue;
             bestDist = hit.distance;
@@ -1030,21 +1053,28 @@ internal static class EnrichmentDump
     }
 
     /// <summary>
-    /// Fill holes inside structure footprints (missing roof colliders) and lift those
-    /// cells toward neighboring structure heights so contour suppress / max-merge see a building.
+    /// Fill holes inside structure / walkable footprints (missing roof colliders) and lift
+    /// those cells toward neighboring heights so contour suppress / max-merge see a deck.
     /// </summary>
     private static int CloseStructureFootprints()
+    {
+        return CloseClassFootprints(HitClass.Structure)
+            + CloseClassFootprints(HitClass.Walkable);
+    }
+
+    private static int CloseClassFootprints(HitClass fillClass)
     {
         if (_classes == null || _heights == null || _width < 3 || _height < 3)
             return 0;
 
+        byte fillId = (byte)fillClass;
         int iters = Math.Max(1, Mathf.CeilToInt(StructureCloseMeters / Math.Max(1e-3f, _cellSize)));
         int n = _width * _height;
         var seed = new bool[n];
         int seedCount = 0;
         for (int i = 0; i < n; i++)
         {
-            if (_classes[i] != (byte)HitClass.Structure)
+            if (_classes[i] != fillId)
                 continue;
             seed[i] = true;
             seedCount++;
@@ -1054,7 +1084,7 @@ internal static class EnrichmentDump
 
         bool[] closed = BinaryClose(seed, _width, _height, iters);
 
-        // Dilate max structure height across the closed mask.
+        // Dilate max class height across the closed mask.
         var roof = new float[n];
         for (int i = 0; i < n; i++)
             roof[i] = seed[i] && !float.IsNaN(_heights[i]) ? _heights[i] : float.NegativeInfinity;
@@ -1072,7 +1102,7 @@ internal static class EnrichmentDump
                 && c != (byte)HitClass.Ignore)
                 continue;
 
-            _classes[i] = (byte)HitClass.Structure;
+            _classes[i] = fillId;
             if (float.IsFinite(roof[i]))
             {
                 float h = _heights[i];
@@ -1441,8 +1471,11 @@ internal static class EnrichmentDump
         for (int depth = 0; t != null && depth < 12; depth++)
         {
             string n = t.name ?? "";
-            // Structures before rock (e.g. "RockBridge" → structure).
-            // Trains/bridges stay structure; bare Rail* is HitClass.Rail below.
+            // Walk-on decks before generic structure (Bridge/Dock/…); Boat/Boathouse stay structure.
+            // Structures before rock (e.g. "RockCabin" → structure).
+            // Trains stay structure; bare Rail* is HitClass.Rail below.
+            if (NameLooksLikeWalkable(n))
+                return HitClass.Walkable;
             if (NameLooksLikeStructure(n))
                 return HitClass.Structure;
             // Ice/water before rock: EP4_Blackrock_WaterTerrain* contains both tokens.
@@ -1595,10 +1628,21 @@ internal static class EnrichmentDump
         }
     }
 
+    private static bool NameLooksLikeWalkable(string n)
+    {
+        foreach (string token in WalkableNameTokens)
+        {
+            if (StructureTokenMatches(n, token))
+                return true;
+        }
+        return false;
+    }
+
     private static bool NameLooksLikeStructure(string n)
     {
         // Man-made props / buildings. Prefer specific tokens (avoid bare "Camp" → Campfire).
         // Verified from enrichment_names.json + DetailedMaps POI stems.
+        // Walk-on decks are HitClass.Walkable (see WalkableNameTokens).
         foreach (string token in StructureNameTokens)
         {
             if (StructureTokenMatches(n, token))
@@ -1681,12 +1725,21 @@ internal static class EnrichmentDump
         }
     }
 
+    /// <summary>
+    /// Decks / crossings meant to be walked on (HitClass.Walkable).
+    /// Boat / Boathouse stay StructureNameTokens.
+    /// </summary>
+    private static readonly string[] WalkableNameTokens =
+    {
+        "Bridge", "Dock", "Pier", "Wharf", "Jetty", "Boardwalk",
+        "Walkway", "Stairs", "Ladder", "Platform", "Ramp", "Deck", "Slipway",
+    };
+
     private static readonly string[] StructureNameTokens =
     {
-        // Waterfront / crossings
-        "Bridge", "Dock", "Pier", "Wharf", "Jetty", "Boardwalk", "Boathouse",
-        "Walkway", "Stairs", "Ladder", "Platform", "Ramp", "Deck",
-        "Boat", "Ship", "Speeder", "OceanPost", "FishingNet", "Slipway",
+        // Waterfront props that are not walk-on decks (those → WalkableNameTokens)
+        "Boathouse",
+        "Boat", "Ship", "Speeder", "OceanPost", "FishingNet",
         // Buildings / settlement (Milton + elsewhere)
         "Building", "Cabin", "House", "Cottage", "Barn", "Shed", "Hut", "Garage",
         "Workshop", "Hangar", "Quonset", "Office", "Church", "School", "Bank", "Store",
@@ -1708,7 +1761,7 @@ internal static class EnrichmentDump
         "PoleWood", "SignPark", "PicnicTable", "PlantSupport", "BarrelWood",
         // Vehicles / rail / cargo — CarSedan covers undamaged + Damaged sedan prefabs (names probe)
         "CarSedan", "CarTruck", "MineTruck", "HayCart", "CargoContainer",
-        // Rail beds → HitClass.Rail; keep rolling stock / bridges as structure.
+        // Rail beds → HitClass.Rail; keep rolling stock as structure.
         "Plane", "Aircraft", "Wreck", "Truck", "Train", "Bus", "Helicopter",
         "Locomotive",
         // Wood stacks / fallen timber props

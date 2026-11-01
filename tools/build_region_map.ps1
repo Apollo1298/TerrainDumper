@@ -12,10 +12,10 @@ copy and no mod build.
 ./tools/build_region_map.ps1 LakeRegion
 
 .EXAMPLE
-./tools/build_region_map.ps1 ModForsakenShore_Region -Size 8192
+./tools/build_region_map.ps1 AshCanyonRegion -Size 8192
 
 .EXAMPLE
-./tools/build_region_map.ps1 LakeRegion -Baseline F:\Github\DetailedMaps\Maps\map_bg_LakeRegion_new.png
+./tools/build_region_map.ps1 LakeRegion -Baseline path\to\map_bg_LakeRegion_new.png
 
 Requires TLD_PATH or TERRAIN_DUMPER_ROOT (or -DumpRoot).
 #>
@@ -58,9 +58,32 @@ $dump = Join-Path $DumpRoot $Scene
 if (-not (Test-Path $dump)) {
     throw "No dump for '$Scene' at $dump. Run dump_map in that region first."
 }
-foreach ($required in @('alignment_samples.json', 'fog_of_war.json', 'meta.json')) {
-    if (-not (Test-Path (Join-Path $dump $required))) {
-        throw "Dump at $dump is missing $required. Open the charcoal map once in region, then re-run dump_map."
+
+$isMod = $Scene.StartsWith('Mod') -and -not $Scene.EndsWith('_Region')
+$fowDump = Join-Path $dump 'fow.json'
+$fowMask = Join-Path $repo "masks\$Scene\fow.json"
+$hasFow = (Test-Path $fowDump) -or (Test-Path $fowMask)
+
+if ($isMod) {
+    if (-not $hasFow) {
+        throw @"
+Mod scene '$Scene' needs fow.json for map framing.
+  Expected: $fowDump
+         or $fowMask
+  Generate: python tools/make_fow_config.py `"$dump`"
+"@
+    }
+    foreach ($required in @('meta.json')) {
+        if (-not (Test-Path (Join-Path $dump $required))) {
+            throw "Dump at $dump is missing $required."
+        }
+    }
+}
+else {
+    foreach ($required in @('alignment_samples.json', 'fog_of_war.json', 'meta.json')) {
+        if (-not (Test-Path (Join-Path $dump $required))) {
+            throw "Dump at $dump is missing $required. Open the charcoal map once in region, then re-run dump_map."
+        }
     }
 }
 if (-not (Get-ChildItem -Path $dump -Filter 'terrain_*_meta.json' -File)) {
@@ -84,9 +107,21 @@ $out = Join-Path $OutDir "map_bg_${Scene}_new.png"
 
 $argList = @($script, $dump, '--size', $Size, '--out', $out)
 if ($Baseline) { $argList += @('--baseline', $Baseline) }
+if ($isMod) {
+    $argList += '--from-fow'
+    if (Test-Path $fowDump) {
+        $argList += @('--fow-config', $fowDump)
+    }
+    elseif (Test-Path $fowMask) {
+        $argList += @('--fow-config', $fowMask)
+    }
+}
 if ($MakeMapBgArgs) { $argList += $MakeMapBgArgs }
 
 Write-Host "build_region_map: $Scene -> $out" -ForegroundColor Cyan
+if ($isMod) {
+    Write-Host "  Mod framing: fow.json (not fog_of_war.json / stale alignment)" -ForegroundColor DarkCyan
+}
 & python @argList
 if ($LASTEXITCODE -ne 0) {
     throw "make_map_bg failed (exit $LASTEXITCODE)"
